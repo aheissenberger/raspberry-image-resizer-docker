@@ -1,0 +1,29 @@
+# Exclude image files from Docker build context
+*.img
+*.iso
+*.zip
+*.gz
+*.xz
+
+# Exclude git
+.git
+.gitignore
+
+# Exclude macOS files
+.DS_Store
+._*
+
+# Exclude documentation (not needed in container)
+README.md
+REQUIREMENTS.md
+
+# Exclude backup files
+*_backup*
+*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].img
+
+# Exclude host script (not needed in container)
+resize-image.sh
+
+# Exclude temporary files
+*.tmp
+*.log
