@@ -229,16 +229,17 @@ The system must:
 
 ---
 
-### **FR-10: SD Card Cloning**
-The system must provide a command to clone a Raspberry Pi SD card to an image file:
+### **FR-10: SD Card Clone and Write**
+The system must provide commands to clone a Raspberry Pi SD card to an image file, and write an image file back to an SD card:
 
 ```
-clone-sd.sh <output-image-path>
+clone-sd.sh clone <output-image-path>
+clone-sd.sh write <image-path>
 ```
 
-The tool must:
+The clone command must:
 
-1. Scan all mounted external devices (removable media)
+1. Scan all removable media devices (including internal SD card readers)
 2. Check each device for Raspberry Pi indicators using a multi-factor detection approach:
    - **Primary indicators** (any 2 required):
      - `cmdline.txt` - Kernel command line parameters
@@ -260,14 +261,32 @@ The tool must:
 6. Use `dd` to clone the entire device to the specified output image file
 7. Display progress during cloning operation
 8. Verify the output image was created successfully
+9. Remount all mountable volumes of the source device upon completion
+
+The write command must:
+
+1. Accept a path to an existing image file
+2. Scan for **removable devices ≤ 2TB only** (no Raspberry Pi detection required)
+   - Must be removable media
+   - Must be ≤ 2TB in size
+3. Display a numbered list of all compatible devices (no Pi-specific filtering)
+4. Allow interactive selection of the target device
+5. Require double confirmation before writing ("yes" and final "WRITE")
+6. Unmount any volumes on the target device before writing
+7. Write the image to the raw device using `dd` with progress
+8. Sync and report success/failure
 
 Safety requirements:
+- **Clone command**: Detects Raspberry Pi SD cards specifically to avoid accidental selection of wrong devices
+- **Write command**: More permissive device scanning (removable/≤2TB only) but requires double confirmation
 - Require explicit user confirmation before starting `dd` operation
-- Validate that the selected device is actually removable/external
-- Request confirmation if the output filepath exists
-- Check for sufficient disk space before cloning
-- Provide clear warnings about the time required for large SD cards
-- Show a progress bar when cloning with `dd`
+- Validate that the selected device meets the operation's criteria (removable media)
+- Request confirmation if the output filepath exists (clone only)
+- Check for sufficient disk space before cloning (clone only)
+- Provide clear warnings about the time required and destructive nature
+- Show progress during `dd` operations (press Ctrl+T on macOS)
+- For write, require explicit double confirmation due to highly destructive action
+- For clone, remount all mountable volumes when done to restore user environment
 
 ---
 

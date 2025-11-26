@@ -5,6 +5,7 @@ A **cross-platform, safe, reproducible** solution for resizing and modifying Ras
 ## Features
 
 - ✅ **SD Card Cloning**: Clone Raspberry Pi SD cards directly to image files
+- ✅ **SD Card Writing**: Write an image back to a Raspberry Pi SD card (with double confirmation)
 - ✅ **Safe**: Creates timestamped backups before any modification
 - ✅ **Cross-platform**: Works on macOS (Intel & Apple Silicon) using Docker
 - ✅ **Reproducible**: Uses pinned Docker images for consistent results
@@ -14,6 +15,7 @@ A **cross-platform, safe, reproducible** solution for resizing and modifying Ras
 - ✅ **File preservation**: Backs up and restores all boot files
 - ✅ **Optional ext4 resize**: Opt-in support for manual root partition resizing
 - ✅ **Dry-run mode**: Preview changes before applying them
+ - ✅ **Post-clone remount**: Automatically remounts mountable volumes of the SD card after cloning
 
 ## Requirements
 
@@ -51,12 +53,12 @@ This will:
 - Preserve all boot files
 - Leave the root partition intact
 
-### 4. Clone an SD Card (Optional)
+### 4. Clone or Write an SD Card (Optional)
 
 If you need to create an image from a physical SD card first:
 
 ```bash
-./clone-sd.sh raspios-backup.img
+./clone-sd.sh clone raspios-backup.img
 ```
 
 This will:
@@ -64,36 +66,59 @@ This will:
 - Display a list of detected devices
 - Let you select which SD card to clone
 - Clone the entire SD card to an image file using `dd`
+- Remount mountable volumes on the SD card after cloning completes
+
+To write an image back to an SD card:
+
+```bash
+./clone-sd.sh write raspios-backup.img
+```
+
+This will:
+- Scan and list compatible SD card devices
+- Prompt for device selection
+- Ask for double confirmation ("yes" and final "WRITE")
+- Unmount the selected device and write the image using `dd`
 
 ## Usage
 
-### Cloning SD Cards
+### SD Card: Clone & Write
 
-The `clone-sd.sh` script creates disk images from physical Raspberry Pi SD cards.
+The `clone-sd.sh` script handles cloning and writing.
 
-**Syntax:**
+**Clone syntax:**
 ```bash
-./clone-sd.sh <output-image-path>
+./clone-sd.sh clone <output-image-path>
 ```
 
-**Example:**
+**Write syntax:**
 ```bash
-./clone-sd.sh ~/Images/my-raspberrypi.img
+./clone-sd.sh write <image-path>
 ```
 
-**Process:**
+**Clone process:**
 1. Insert your Raspberry Pi SD card into your Mac
 2. Run the clone script
-3. Select the device from the numbered list
+3. Select the device from the numbered list (filtered for Raspberry Pi indicators)
 4. Confirm the operation
 5. Wait for cloning to complete (can take 30 minutes to 2+ hours)
+6. Volumes on the SD card are remounted where possible
+
+**Write process:**
+1. Ensure the target removable storage device is connected
+2. Run the write command with a valid image path
+3. Select the target device from the list (shows all removable devices ≤ 2TB)
+4. Confirm with "yes", then type "WRITE" to proceed (destructive)
+5. The tool unmounts the target and writes the image with `dd`
 
 **Notes:**
+- **Clone**: Only lists devices with Raspberry Pi indicators (`cmdline.txt`, `config.txt`, etc.) for safety
+- **Write**: Lists all removable devices ≤ 2TB (no Pi detection) - use with caution
 - Requires sudo privileges for `dd` operation
 - Uses raw device (`rdisk`) for faster performance
-- Press `Ctrl+T` during cloning to see progress
-- Automatically checks for sufficient disk space
-- Only shows devices containing `cmdline.txt` (Raspberry Pi indicator)
+- Press `Ctrl+T` during operations to see progress
+- Clone automatically checks for sufficient disk space
+- On macOS, only mountable filesystems (e.g., FAT32 boot) will remount; ext4 root does not mount natively
 
 ---
 
@@ -153,6 +178,8 @@ The `clone-sd.sh` script creates disk images from physical Raspberry Pi SD cards
 12. **Cleanup**: Unmounts filesystems and detaches loop devices
 
 ## Safety Features
+
+All disk manipulations are inside a docker container on the copy of the image and cannot access the disks on the host system.
 
 ### Automatic Backups
 - Original image **never modified**

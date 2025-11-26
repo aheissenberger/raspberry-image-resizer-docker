@@ -33,35 +33,34 @@ log_debug() {
 
 show_usage() {
     cat << EOF
-Usage: $0 <output-image-path>
+Usage: $0 <command> <path> [options]
 
-Clone a Raspberry Pi SD card to an image file.
-
-Arguments:
-  <output-image-path>      Path where the cloned image will be saved (required)
+Commands:
+    clone <output-image-path>   Clone a Raspberry Pi SD card to an image file
+    write <image-path>          Write an image file to a Raspberry Pi SD card (DESTRUCTIVE)
 
 Options:
-  -h, --help              Show this help message
-  -v, --verbose           Show detailed debug output
+    -h, --help                  Show this help message
+    -v, --verbose               Show detailed debug output
 
 Examples:
-  $0 raspios-backup.img
-  $0 raspios-backup.img --verbose
-  $0 ~/Images/my-raspberrypi.img
+    $0 clone raspios-backup.img
+    $0 clone ~/Images/my-raspberrypi.img --verbose
+    $0 write raspios-backup.img
 
 Notes:
-  - This script will scan all mounted external devices for Raspberry Pi SD cards
-  - Uses multi-factor detection (cmdline.txt, config.txt, start.elf, overlays/)
-  - Requires at least 2 Raspberry Pi indicators to identify a valid SD card
-  - You will be prompted to select which device to clone
-  - The cloning process can take several minutes to hours depending on SD card size
+    - The tool scans external/removable devices for Raspberry Pi SD cards
+    - Detection uses multiple indicators (cmdline.txt, config.txt, start.elf, overlays/)
+    - You will be prompted to select the SD card device
+    - dd operations are destructive for 'write' – double confirmation required
 
 EOF
     exit 0
 }
 
-# Parse arguments
-OUTPUT_IMAGE=""
+# Parse arguments for subcommands 'clone' and 'write'
+SUBCOMMAND=""
+PATH_ARG=""
 VERBOSE=0
 
 while [[ $# -gt 0 ]]; do
@@ -73,46 +72,42 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=1
             shift
             ;;
+        clone|write)
+            if [[ -z "$SUBCOMMAND" ]]; then
+                SUBCOMMAND="$1"
+                shift
+            else
+                # If subcommand is already set, treat as path
+                if [[ -z "$PATH_ARG" ]]; then
+                    PATH_ARG="$1"
+                    shift
+                else
+                    log_error "Unexpected argument: $1"
+                    exit 1
+                fi
+            fi
+            ;;
         *)
-            if [[ -z "$OUTPUT_IMAGE" ]]; then
-                OUTPUT_IMAGE="$1"
+            if [[ -z "$PATH_ARG" ]]; then
+                PATH_ARG="$1"
+                shift
             else
                 log_error "Unknown argument: $1"
                 exit 1
             fi
-            shift
             ;;
     esac
 done
 
-# Validate required arguments
-if [[ -z "$OUTPUT_IMAGE" ]]; then
-    log_error "Missing required argument: <output-image-path>"
+if [[ -z "$SUBCOMMAND" ]] || [[ -z "$PATH_ARG" ]]; then
+    log_error "Missing required arguments."
     echo ""
     show_usage
 fi
 
-# Convert to absolute path
-OUTPUT_DIR="$(cd "$(dirname "$OUTPUT_IMAGE")" 2>/dev/null && pwd)" || OUTPUT_DIR="$(pwd)"
-OUTPUT_NAME="$(basename "$OUTPUT_IMAGE")"
-OUTPUT_IMAGE="$OUTPUT_DIR/$OUTPUT_NAME"
-
-# Check if output file already exists and request confirmation
-if [[ -f "$OUTPUT_IMAGE" ]]; then
-    log_warn "Output file already exists: $OUTPUT_IMAGE"
-    read -p "Do you want to overwrite it? (yes/no): " OVERWRITE_CONFIRM
-    
-    if [[ "$OVERWRITE_CONFIRM" != "yes" ]]; then
-        log_info "Operation cancelled. Please choose a different filename."
-        exit 0
-    fi
-    
-    log_warn "Existing file will be overwritten"
-fi
-
-log_info "Raspberry Pi SD Card Cloner"
-log_info "==========================="
-log_info "Output image: $OUTPUT_IMAGE"
+log_info "Raspberry Pi SD Card Tool"
+log_info "========================="
+log_info "Command: $SUBCOMMAND"
 echo ""
 
 # Function to get human-readable size
@@ -214,8 +209,11 @@ check_raspberry_pi_indicators() {
 
 # Function to scan for Raspberry Pi SD card devices
 # Populates global arrays: DEVICES, DEVICE_NAMES, DEVICE_SIZES, DEVICE_PATHS, DEVICE_INDICATORS
+# Parameters:
+#   $1 - operation type: "clone" or "write" (affects device filtering criteria)
 # Returns: number of devices found
 scan_for_raspberry_pi_devices() {
+    local operation_type="${1:-clone}"
     index=0
     
     log_debug "Starting device scan..."
@@ -239,16 +237,15 @@ scan_for_raspberry_pi_devices() {
             continue
         fi
         
-        # Check if it's internal (skip internal disks, but allow SD cards)
-        local is_internal=$(echo "$disk_info" | grep "Device Location:" | grep -q "Internal" && echo "yes" || echo "no")
+        # Check device attributes
         local is_removable=$(echo "$disk_info" | grep "Removable Media:" | grep -q "Removable" && echo "yes" || echo "no")
         local protocol=$(echo "$disk_info" | grep "Protocol:" | awk -F": " '{print $2}' | xargs)
         
-        log_debug "  Internal: $is_internal, Removable: $is_removable, Protocol: $protocol"
+        log_debug "  Removable: $is_removable, Protocol: $protocol"
         
-        # Skip internal non-removable disks (likely system disks)
-        if [[ "$is_internal" == "yes" ]] && [[ "$is_removable" != "yes" ]]; then
-            log_debug "  Skipping internal non-removable disk"
+        # For both clone and write: only check if removable
+        if [[ "$is_removable" != "yes" ]]; then
+            log_debug "  Skipping: not removable media"
             continue
         fi
         
@@ -264,7 +261,31 @@ scan_for_raspberry_pi_devices() {
             continue
         fi
         
-        # Check for boot partition (Windows_FAT_32 named "boot")
+        # For write operations: skip Raspberry Pi detection, only check basic criteria
+        if [[ "$operation_type" == "write" ]]; then
+            # Write operation: device passed all criteria (external, removable, size <= 2TB)
+            local device_name=$(echo "$disk_info" | grep "Device / Media Name" | awk -F": " '{print $2}' | xargs)
+            if [[ -z "$device_name" ]]; then
+                device_name="Unknown"
+            fi
+            
+            device_size=$(echo "$disk_info" | grep "Disk Size" | awk -F"(" '{print $2}' | awk '{print $1}')
+            local device_size_human=$(human_size "$device_size")
+            
+            log_debug "  ✓ Added to device list (write mode - no Pi detection required)"
+            
+            # Store device info
+            DEVICES[$index]="$disk"
+            DEVICE_NAMES[$index]="$device_name"
+            DEVICE_SIZES[$index]="$device_size_human"
+            DEVICE_PATHS[$index]="$disk"
+            DEVICE_INDICATORS[$index]="N/A (write mode)"
+            
+            index=$((index + 1))
+            continue
+        fi
+        
+        # For clone operations: check for boot partition (Windows_FAT_32 named "boot")
         local has_boot_partition=false
         while IFS= read -r partition_line; do
             # Extract fields from diskutil list output: "   1:             Windows_FAT_32 boot                    66.1 MB    disk16s1"
@@ -286,15 +307,17 @@ scan_for_raspberry_pi_devices() {
             continue
         fi
         
-        # Allow internal SD card readers - check for SD protocol or Secure Digital in device name
+        # Get device name for logging
         local device_name=$(echo "$disk_info" | grep "Device / Media Name" | awk -F": " '{print $2}' | xargs)
+        
+        # For clone: allow internal SD card readers - check for SD protocol or Secure Digital in device name
         local is_sd_card=false
         if [[ "$protocol" == "Secure Digital" ]] || [[ "$protocol" == "SD" ]] || [[ "$device_name" == *"SDXC"* ]] || [[ "$device_name" == *"SD Card"* ]]; then
             is_sd_card=true
             log_debug "  Detected as SD card"
         fi
         
-        # Check if it's USB, SD card, or removable
+        # Clone: allow USB, SD card, or removable (including internal SD readers)
         if [[ "$is_removable" == "yes" ]] || [[ "$protocol" =~ USB|SD ]] || [[ "$is_sd_card" == "true" ]]; then
             log_debug "  Checking for Raspberry Pi indicators..."
             
@@ -338,31 +361,7 @@ scan_for_raspberry_pi_devices() {
     return $index
 }
 
-# Scan for external devices
-log_info "Scanning for external devices with Raspberry Pi SD cards..."
-echo ""
-
-# Initialize arrays at script level (global scope)
-DEVICES=()
-DEVICE_NAMES=()
-DEVICE_SIZES=()
-DEVICE_PATHS=()
-DEVICE_INDICATORS=()
-
-scan_for_raspberry_pi_devices || true
-INDEX=$index
-
-log_debug "Scan returned: INDEX=$INDEX devices"
-log_debug "DEVICES array length: ${#DEVICES[@]}"
-
-if [[ ${#DEVICES[@]} -gt 0 ]]; then
-    log_debug "First device: ${DEVICES[0]}"
-    log_debug "First device name: ${DEVICE_NAMES[0]}"
-else
-    log_debug "Arrays are EMPTY after function call!"
-fi
-
-echo ""
+# Scanning will be executed within subcommand branches below
 
 # Function to show error if no devices found
 show_no_devices_error() {
@@ -573,6 +572,8 @@ perform_clone() {
     
     # Sync to ensure all data is written
     sync
+
+    diskutil mountDisk "$device" > /dev/null 2>&1 || true
     
     echo ""
     log_info "Clone completed successfully!"
@@ -628,64 +629,218 @@ verify_cloned_image() {
     return 0
 }
 
-# Main workflow
-if [[ $INDEX -eq 0 ]] || [[ ${#DEVICES[@]} -eq 0 ]]; then
-    log_debug "No devices found, showing error..."
-    show_no_devices_error
-    exit 1
-fi
+# Mount all mountable volumes of a disk
+mount_all_volumes() {
+    local device=$1
+    log_info "Remounting volumes on $device..."
 
-log_debug "Proceeding to display ${#DEVICES[@]} device(s)..."
+    # Try to (re)mount all mountable volumes on the disk
+    if diskutil mountDisk "$device" >/dev/null 2>&1; then
+        log_info "Volumes mounted where possible."
+        return 0
+    fi
 
-display_detected_devices ${#DEVICES[@]}
+    # Fallback: iterate partitions and attempt to mount each
+    while IFS= read -r line; do
+        local ident=$(echo "$line" | awk '{print $NF}')
+        [[ -z "$ident" ]] && continue
 
-echo ""
+        local mp=$(diskutil info "/dev/$ident" 2>/dev/null | awk -F': ' '/Mount Point:/ {print $2}')
+        if [[ -z "$mp" ]] || [[ "$mp" == "Not Mounted" ]]; then
+            if diskutil mount "/dev/$ident" >/dev/null 2>&1; then
+                local new_mp=$(diskutil info "/dev/$ident" 2>/dev/null | awk -F': ' '/Mount Point:/ {print $2}')
+                if [[ -n "$new_mp" && "$new_mp" != "Not Mounted" ]]; then
+                    log_info "Mounted /dev/$ident at $new_mp"
+                fi
+            fi
+        fi
+    done < <(diskutil list "$device" | grep -E '^\s+[0-9]+:')
 
-log_debug "Prompting for device selection..."
+    log_info "Mount attempt completed (note: Linux ext4 partitions are not mountable on macOS by default)."
+    return 0
+}
 
-SELECTION=$(select_device $INDEX)
+# Write confirmation for destructive write
+get_user_confirmation_write() {
+    local device=$1
+    local name=$2
+    local image_path=$3
+    local size_human=$4
 
-log_debug "User selected: $SELECTION"
+    log_warn "==================== DANGEROUS OPERATION ===================="
+    log_warn "This will WRITE the image to the SD card and DESTROY data."
+    log_warn "Device: $device ($name)"
+    log_warn "Image:  $image_path"
+    [[ -n "$size_human" ]] && log_warn "Image size: $size_human"
+    log_warn "============================================================"
+    echo ""
+    read -p "Are you sure you want to proceed? (yes/no): " confirm
+    if [[ "$confirm" != "yes" ]]; then
+        log_info "Operation cancelled by user."
+        return 1
+    fi
+    echo ""
+    log_warn "FINAL CONFIRMATION: About to execute 'dd' to WRITE image."
+    read -p "Type 'WRITE' to confirm and start writing: " final_confirm
+    if [[ "$final_confirm" != "WRITE" ]]; then
+        log_info "Operation cancelled. Write command not confirmed."
+        return 1
+    fi
+    return 0
+}
 
-get_selected_device_info $SELECTION
+# Perform write: image -> device
+perform_write() {
+    local image_path=$1
+    local device=$2
 
-log_debug "Verifying device is removable..."
+    if [[ ! -f "$image_path" ]]; then
+        log_error "Image file not found: $image_path"
+        return 1
+    fi
 
-if ! verify_device_is_removable "$SELECTED_DEVICE"; then
-    exit 1
-fi
+    local raw_device=$(echo "$device" | sed 's|/dev/disk|/dev/rdisk|')
 
-log_debug "Checking disk space..."
+    echo ""
+    log_info "Starting write operation..."
+    log_info "This may take several minutes to hours. Please be patient."
+    echo ""
 
-if ! check_disk_space "$SELECTED_DEVICE" "$OUTPUT_DIR"; then
-    exit 1
-fi
+    log_info "Unmounting volumes on $device..."
+    diskutil unmountDisk "$device" > /dev/null 2>&1 || true
 
-ESTIMATED_TIME=$(estimate_clone_time $DEVICE_SIZE_BYTES)
+    log_info "Writing $image_path to $raw_device..."
+    log_info "Press Ctrl+T to see progress during writing (macOS feature)"
+    log_info "Starting 'dd' operation (requires sudo)..."
+    log_info "Using optimized block size: 16MB for maximum throughput"
+    echo ""
 
-log_debug "Getting user confirmation..."
+    if ! sudo dd if="$image_path" of="$raw_device" bs=16m status=progress 2>&1; then
+        log_error "Write operation failed"
+        return 1
+    fi
 
-if ! get_user_confirmation "$SELECTED_DEVICE" "$SELECTED_NAME" "$SELECTED_SIZE" "$ESTIMATED_TIME"; then
-    exit 0
-fi
+    diskutil mountDisk "$device" > /dev/null 2>&1 || true
 
-log_debug "Starting clone operation..."
+    sync
+    echo ""
+    log_info "Write completed successfully!"
+    return 0
+}
 
-if ! perform_clone "$SELECTED_DEVICE" "$OUTPUT_IMAGE"; then
-    exit 1
-fi
+# Main workflow branching
+case "$SUBCOMMAND" in
+    clone)
+        OUTPUT_IMAGE="$PATH_ARG"
+        OUTPUT_DIR="$(cd "$(dirname "$OUTPUT_IMAGE")" 2>/dev/null && pwd)" || OUTPUT_DIR="$(pwd)"
+        OUTPUT_NAME="$(basename "$OUTPUT_IMAGE")"
+        OUTPUT_IMAGE="$OUTPUT_DIR/$OUTPUT_NAME"
 
-log_debug "Verifying cloned image..."
+        if [[ -f "$OUTPUT_IMAGE" ]]; then
+            log_warn "Output file already exists: $OUTPUT_IMAGE"
+            read -p "Do you want to overwrite it? (yes/no): " OVERWRITE_CONFIRM
+            if [[ "$OVERWRITE_CONFIRM" != "yes" ]]; then
+                log_info "Operation cancelled. Please choose a different filename."
+                exit 0
+            fi
+            log_warn "Existing file will be overwritten"
+        fi
 
-if ! verify_cloned_image "$OUTPUT_IMAGE" "$DEVICE_SIZE_BYTES"; then
-    exit 1
-fi
+        log_info "Scanning for external devices with Raspberry Pi SD cards..."
+        echo ""
 
-echo ""
-log_info "✓ Clone operation completed successfully!"
-log_info ""
-log_info "You can now use resize-image.sh to modify this image if needed:"
-log_info "  ./resize-image.sh $OUTPUT_IMAGE --boot-size 512"
-log_info ""
+        DEVICES=(); DEVICE_NAMES=(); DEVICE_SIZES=(); DEVICE_PATHS=(); DEVICE_INDICATORS=()
+        scan_for_raspberry_pi_devices "clone" || true
+        INDEX=$index
+
+        log_debug "Scan returned: INDEX=$INDEX devices"
+        log_debug "DEVICES array length: ${#DEVICES[@]}"
+        echo ""
+
+        if [[ $INDEX -eq 0 ]] || [[ ${#DEVICES[@]} -eq 0 ]]; then
+            log_debug "No devices found, showing error..."
+            show_no_devices_error
+            exit 1
+        fi
+
+        log_debug "Proceeding to display ${#DEVICES[@]} device(s)..."
+        display_detected_devices ${#DEVICES[@]}
+        echo ""
+        log_debug "Prompting for device selection..."
+        SELECTION=$(select_device $INDEX)
+        log_debug "User selected: $SELECTION"
+        get_selected_device_info $SELECTION
+        log_debug "Verifying device is removable..."
+        if ! verify_device_is_removable "$SELECTED_DEVICE"; then
+            exit 1
+        fi
+        log_debug "Checking disk space..."
+        if ! check_disk_space "$SELECTED_DEVICE" "$OUTPUT_DIR"; then
+            exit 1
+        fi
+        ESTIMATED_TIME=$(estimate_clone_time $DEVICE_SIZE_BYTES)
+        log_debug "Getting user confirmation..."
+        if ! get_user_confirmation "$SELECTED_DEVICE" "$SELECTED_NAME" "$SELECTED_SIZE" "$ESTIMATED_TIME"; then
+            exit 0
+        fi
+        log_debug "Starting clone operation..."
+        if ! perform_clone "$SELECTED_DEVICE" "$OUTPUT_IMAGE"; then
+            exit 1
+        fi
+        log_debug "Verifying cloned image..."
+        if ! verify_cloned_image "$OUTPUT_IMAGE" "$DEVICE_SIZE_BYTES"; then
+            exit 1
+        fi
+        # Remount all volumes on the source device after cloning
+        mount_all_volumes "$SELECTED_DEVICE"
+        echo ""
+        log_info "✓ Clone operation completed successfully!"
+        log_info ""
+        log_info "You can now use resize-image.sh to modify this image if needed:"
+        log_info "  ./resize-image.sh $OUTPUT_IMAGE --boot-size 512"
+        log_info ""
+        ;;
+    write)
+        INPUT_IMAGE="$PATH_ARG"
+        if [[ ! -f "$INPUT_IMAGE" ]]; then
+            log_error "Image file not found: $INPUT_IMAGE"
+            exit 1
+        fi
+        INPUT_IMAGE="$(cd "$(dirname "$INPUT_IMAGE")" 2>/dev/null && pwd)/$(basename "$INPUT_IMAGE")"
+        log_info "Image to write: $INPUT_IMAGE"
+        echo ""
+
+        log_info "Scanning for external removable devices with Raspberry Pi SD cards..."
+        echo ""
+        DEVICES=(); DEVICE_NAMES=(); DEVICE_SIZES=(); DEVICE_PATHS=(); DEVICE_INDICATORS=()
+        scan_for_raspberry_pi_devices "write" || true
+        INDEX=$index
+        if [[ $INDEX -eq 0 ]] || [[ ${#DEVICES[@]} -eq 0 ]]; then
+            show_no_devices_error
+            exit 1
+        fi
+        display_detected_devices ${#DEVICES[@]}
+        SELECTION=$(select_device $INDEX)
+        get_selected_device_info $SELECTION
+        if ! verify_device_is_removable "$SELECTED_DEVICE"; then
+            exit 1
+        fi
+        IMAGE_SIZE_BYTES=$(stat -f%z "$INPUT_IMAGE" 2>/dev/null || echo 0)
+        IMAGE_SIZE_HUMAN=$(human_size "$IMAGE_SIZE_BYTES")
+        if ! get_user_confirmation_write "$SELECTED_DEVICE" "$SELECTED_NAME" "$INPUT_IMAGE" "$IMAGE_SIZE_HUMAN"; then
+            exit 0
+        fi
+        if ! perform_write "$INPUT_IMAGE" "$SELECTED_DEVICE"; then
+            exit 1
+        fi
+        echo ""
+        log_info "✓ Write operation completed successfully!"
+        ;;
+    *)
+        log_error "Unknown command: $SUBCOMMAND"
+        echo ""
+        show_usage
+        ;;
+esac
 
 exit 0
