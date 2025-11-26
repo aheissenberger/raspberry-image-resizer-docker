@@ -106,89 +106,105 @@ if [[ ! -f "$IMAGE_PATH" ]]; then
     exit 1
 fi
 
-# Convert to absolute path
-IMAGE_PATH="$(cd "$(dirname "$IMAGE_PATH")" && pwd)/$(basename "$IMAGE_PATH")"
-IMAGE_DIR="$(dirname "$IMAGE_PATH")"
-IMAGE_NAME="$(basename "$IMAGE_PATH")"
-
-log_info "Raspberry Pi Image Resizer"
-log_info "=========================="
-log_info "Image: $IMAGE_PATH"
-log_info "Boot partition size: ${BOOT_SIZE}MB"
-[[ $UNSAFE_RESIZE_EXT4 -eq 1 ]] && log_warn "Unsafe ext4 resizing ENABLED"
-[[ $DRY_RUN -eq 1 ]] && log_warn "DRY RUN mode - no modifications will be made"
-
-# Check if Docker is running
-if ! docker info > /dev/null 2>&1; then
-    log_error "Docker is not running. Please start Docker Desktop."
-    exit 1
-fi
-
-# Check if Docker image exists
-if ! docker image inspect "$DOCKER_IMAGE" > /dev/null 2>&1; then
-    log_warn "Docker image '$DOCKER_IMAGE' not found. Building..."
-    cd "$SCRIPT_DIR"
-    docker build -t "$DOCKER_IMAGE" .
-    if [[ $? -ne 0 ]]; then
-        log_error "Failed to build Docker image"
-        exit 1
-    fi
-    log_info "Docker image built successfully"
-fi
-
-# Create backup with timestamp
-TIMESTAMP=$(date +%Y%m%d%H%M)
-BACKUP_NAME="${IMAGE_NAME%.*}_${TIMESTAMP}.img"
-BACKUP_PATH="$IMAGE_DIR/$BACKUP_NAME"
-
-if [[ $DRY_RUN -eq 0 ]]; then
-    log_info "Creating backup: $BACKUP_NAME"
-    cp "$IMAGE_PATH" "$BACKUP_PATH"
+# Function to resize Raspberry Pi image
+# Parameters:
+#   $1 - Image path
+#   $2 - Boot size in MB
+# Returns: 0 on success, non-zero on failure
+resize_raspberry_pi_image() {
+    local image_path="$1"
+    local boot_size="$2"
     
-    if [[ $? -ne 0 ]]; then
-        log_error "Failed to create backup"
-        exit 1
+    # Convert to absolute path
+    image_path="$(cd "$(dirname "$image_path")" && pwd)/$(basename "$image_path")"
+    local image_dir="$(dirname "$image_path")"
+    local image_name="$(basename "$image_path")"
+
+    log_info "Raspberry Pi Image Resizer"
+    log_info "=========================="
+    log_info "Image: $image_path"
+    log_info "Boot partition size: ${boot_size}MB"
+    [[ $UNSAFE_RESIZE_EXT4 -eq 1 ]] && log_warn "Unsafe ext4 resizing ENABLED"
+    [[ $DRY_RUN -eq 1 ]] && log_warn "DRY RUN mode - no modifications will be made"
+
+    # Check if Docker is running
+    if ! docker info > /dev/null 2>&1; then
+        log_error "Docker is not running. Please start Docker Desktop."
+        return 1
     fi
-    
-    log_info "Backup created successfully"
-    WORK_IMAGE="$BACKUP_NAME"
-else
-    log_info "Dry run mode - using original image (read-only)"
-    WORK_IMAGE="$IMAGE_NAME"
-fi
 
-# Build Docker run command
-DOCKER_CMD="docker run --rm --privileged"
+    # Check if Docker image exists
+    if ! docker image inspect "$DOCKER_IMAGE" > /dev/null 2>&1; then
+        log_warn "Docker image '$DOCKER_IMAGE' not found. Building..."
+        cd "$SCRIPT_DIR"
+        docker build -t "$DOCKER_IMAGE" .
+        if [[ $? -ne 0 ]]; then
+            log_error "Failed to build Docker image"
+            return 1
+        fi
+        log_info "Docker image built successfully"
+    fi
 
-# Add volume mount
-DOCKER_CMD="$DOCKER_CMD -v \"$IMAGE_DIR:/work\""
+    # Create backup with timestamp
+    local timestamp=$(date +%Y%m%d%H%M)
+    local backup_name="${image_name%.*}_${timestamp}.img"
+    local backup_path="$image_dir/$backup_name"
+    local work_image
 
-# Add environment variables
-DOCKER_CMD="$DOCKER_CMD -e IMAGE_FILE=\"$WORK_IMAGE\""
-DOCKER_CMD="$DOCKER_CMD -e BOOT_SIZE_MB=\"$BOOT_SIZE\""
-DOCKER_CMD="$DOCKER_CMD -e UNSAFE_RESIZE_EXT4=\"$UNSAFE_RESIZE_EXT4\""
-DOCKER_CMD="$DOCKER_CMD -e DRY_RUN=\"$DRY_RUN\""
-DOCKER_CMD="$DOCKER_CMD -e VERBOSE=\"$VERBOSE\""
-
-# Add image name
-DOCKER_CMD="$DOCKER_CMD \"$DOCKER_IMAGE\""
-
-# Run Docker container
-log_info "Starting Docker container..."
-eval $DOCKER_CMD
-
-EXIT_CODE=$?
-
-if [[ $EXIT_CODE -eq 0 ]]; then
-    log_info "Operation completed successfully!"
     if [[ $DRY_RUN -eq 0 ]]; then
-        log_info "Modified image: $BACKUP_PATH"
-        log_info "Original image unchanged: $IMAGE_PATH"
+        log_info "Creating backup: $backup_name"
+        cp "$image_path" "$backup_path"
+        
+        if [[ $? -ne 0 ]]; then
+            log_error "Failed to create backup"
+            return 1
+        fi
+        
+        log_info "Backup created successfully"
+        work_image="$backup_name"
+    else
+        log_info "Dry run mode - using original image (read-only)"
+        work_image="$image_name"
     fi
-else
-    log_error "Operation failed with exit code $EXIT_CODE"
-    if [[ $DRY_RUN -eq 0 ]]; then
-        log_warn "Backup preserved at: $BACKUP_PATH"
+
+    # Build Docker run command
+    local docker_cmd="docker run --rm --privileged"
+
+    # Add volume mount
+    docker_cmd="$docker_cmd -v \"$image_dir:/work\""
+
+    # Add environment variables
+    docker_cmd="$docker_cmd -e IMAGE_FILE=\"$work_image\""
+    docker_cmd="$docker_cmd -e BOOT_SIZE_MB=\"$boot_size\""
+    docker_cmd="$docker_cmd -e UNSAFE_RESIZE_EXT4=\"$UNSAFE_RESIZE_EXT4\""
+    docker_cmd="$docker_cmd -e DRY_RUN=\"$DRY_RUN\""
+    docker_cmd="$docker_cmd -e VERBOSE=\"$VERBOSE\""
+
+    # Add image name
+    docker_cmd="$docker_cmd \"$DOCKER_IMAGE\""
+
+    # Run Docker container
+    log_info "Starting Docker container..."
+    eval $docker_cmd
+
+    local exit_code=$?
+
+    if [[ $exit_code -eq 0 ]]; then
+        log_info "Operation completed successfully!"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            log_info "Modified image: $backup_path"
+            log_info "Original image unchanged: $image_path"
+        fi
+        return 0
+    else
+        log_error "Operation failed with exit code $exit_code"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            log_warn "Backup preserved at: $backup_path"
+        fi
+        return $exit_code
     fi
-    exit $EXIT_CODE
-fi
+}
+
+# Main execution
+resize_raspberry_pi_image "$IMAGE_PATH" "$BOOT_SIZE"
+exit $?
