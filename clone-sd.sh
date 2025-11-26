@@ -26,7 +26,9 @@ log_error() {
 }
 
 log_debug() {
-    echo -e "${BLUE}[DEBUG]${NC} $1"
+    if [[ $VERBOSE -eq 1 ]]; then
+        echo -e "${BLUE}[DEBUG]${NC} $1" >&2
+    fi
 }
 
 show_usage() {
@@ -40,9 +42,11 @@ Arguments:
 
 Options:
   -h, --help              Show this help message
+  -v, --verbose           Show detailed debug output
 
 Examples:
   $0 raspios-backup.img
+  $0 raspios-backup.img --verbose
   $0 ~/Images/my-raspberrypi.img
 
 Notes:
@@ -58,11 +62,16 @@ EOF
 
 # Parse arguments
 OUTPUT_IMAGE=""
+VERBOSE=0
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         -h|--help)
             show_usage
+            ;;
+        -v|--verbose)
+            VERBOSE=1
+            shift
             ;;
         *)
             if [[ -z "$OUTPUT_IMAGE" ]]; then
@@ -126,52 +135,75 @@ check_raspberry_pi_indicators() {
     local score=0
     local indicators=""
     
-    # Check each partition mounted from this device
-    for part in /Volumes/*; do
-        if [[ -d "$part" ]]; then
-            # Check if this volume belongs to our device
-            local vol_dev=$(diskutil info "$part" 2>/dev/null | grep "Device Node" | awk '{print $3}')
-            if [[ "$vol_dev" == ${device}s* ]] || [[ "$vol_dev" == "$device" ]]; then
-                
-                # Primary indicators (weighted higher)
-                if [[ -f "$part/cmdline.txt" ]]; then
-                    ((score += 2))
-                    indicators="${indicators}cmdline.txt "
-                fi
-                
-                if [[ -f "$part/config.txt" ]]; then
-                    ((score += 2))
-                    indicators="${indicators}config.txt "
-                fi
-                
-                if [[ -f "$part/start.elf" ]] || [[ -f "$part/start4.elf" ]]; then
-                    ((score += 2))
-                    indicators="${indicators}start.elf "
-                fi
-                
-                if [[ -d "$part/overlays" ]]; then
-                    ((score += 2))
-                    indicators="${indicators}overlays/ "
-                fi
-                
-                # Secondary indicators (weighted lower)
-                if [[ -f "$part/bootcode.bin" ]]; then
-                    ((score += 1))
-                    indicators="${indicators}bootcode.bin "
-                fi
-                
-                if ls "$part"/kernel*.img &>/dev/null; then
-                    ((score += 1))
-                    indicators="${indicators}kernel.img "
-                fi
-                
-                if ls "$part"/bcm27*.dtb &>/dev/null; then
-                    ((score += 1))
-                    indicators="${indicators}dtb-files "
-                fi
-            fi
+    log_debug "    Checking Raspberry Pi indicators on $device partitions"
+    
+    # Get list of partitions for this device and their mount points
+    while IFS= read -r part_line; do
+        # Extract partition device (e.g., disk16s1)
+        local part_device=$(echo "$part_line" | awk '{print $NF}')
+        
+        # Skip if this is the disk itself, not a partition
+        if [[ "$part_device" == "$device" ]] || [[ ! "$part_device" =~ s[0-9]+$ ]]; then
+            continue
         fi
-    done
+        
+        log_debug "      Checking partition: $part_device"
+        
+        # Get mount point for this partition
+        local mount_point=$(diskutil info "/dev/$part_device" 2>/dev/null | grep "Mount Point:" | sed 's/.*Mount Point:[[:space:]]*//')
+        
+        if [[ -n "$mount_point" ]] && [[ -d "$mount_point" ]]; then
+            log_debug "        Mount point: $mount_point"
+            
+            # Primary indicators (weighted higher)
+            if [[ -f "$mount_point/cmdline.txt" ]]; then
+                ((score += 2))
+                indicators="${indicators}cmdline.txt "
+                log_debug "        ✓ Found cmdline.txt"
+            fi
+            
+            if [[ -f "$mount_point/config.txt" ]]; then
+                ((score += 2))
+                indicators="${indicators}config.txt "
+                log_debug "        ✓ Found config.txt"
+            fi
+            
+            if [[ -f "$mount_point/start.elf" ]] || [[ -f "$mount_point/start4.elf" ]]; then
+                ((score += 2))
+                indicators="${indicators}start.elf "
+                log_debug "        ✓ Found start.elf"
+            fi
+            
+            if [[ -d "$mount_point/overlays" ]]; then
+                ((score += 2))
+                indicators="${indicators}overlays/ "
+                log_debug "        ✓ Found overlays/"
+            fi
+            
+            # Secondary indicators (weighted lower)
+            if [[ -f "$mount_point/bootcode.bin" ]]; then
+                ((score += 1))
+                indicators="${indicators}bootcode.bin "
+                log_debug "        ✓ Found bootcode.bin"
+            fi
+            
+            if ls "$mount_point"/kernel*.img &>/dev/null; then
+                ((score += 1))
+                indicators="${indicators}kernel.img "
+                log_debug "        ✓ Found kernel*.img"
+            fi
+            
+            if ls "$mount_point"/bcm27*.dtb &>/dev/null; then
+                ((score += 1))
+                indicators="${indicators}dtb-files "
+                log_debug "        ✓ Found bcm27*.dtb"
+            fi
+        else
+            log_debug "        Not mounted"
+        fi
+    done < <(diskutil list "$device" | grep -E '^\s+[0-9]+:')
+    
+    log_debug "    Final score: $score, Indicators: $indicators"
     
     # Export score and indicators for caller
     echo "$score:$indicators"
@@ -192,27 +224,93 @@ declare -a DEVICE_INDICATORS
 
 INDEX=0
 
-# Get list of all disks
-for disk in $(diskutil list | grep "^/dev/disk" | awk '{print $1}'); do
-    # Extract disk number
-    disk_id=$(basename "$disk")
+# Get list of all disks using process substitution to preserve array values
+while IFS= read -r disk_line; do
+    # Extract disk device from lines like "/dev/disk16 (internal, physical):"
+    disk=$(echo "$disk_line" | grep -oE '/dev/disk[0-9]+' | head -1)
     
-    # Skip internal disks (disk0 is typically internal)
+    if [[ -z "$disk" ]]; then
+        continue
+    fi
+    
+    log_debug "Checking disk: $disk"
+    
+    # Get disk info
     disk_info=$(diskutil info "$disk" 2>/dev/null)
     
-    # Check if it's removable/external
-    is_removable=$(echo "$disk_info" | grep -E "Removable Media:|Protocol:" | grep -q "Yes\|USB\|SD" && echo "yes" || echo "no")
+    if [[ -z "$disk_info" ]]; then
+        log_debug "  No disk info available"
+        continue
+    fi
     
-    if [[ "$is_removable" == "yes" ]] && echo "$disk_info" | grep -q "Protocol.*USB\|Protocol.*SD"; then
+    # Check if it's internal (skip internal disks, but allow SD cards)
+    is_internal=$(echo "$disk_info" | grep "Device Location:" | grep -q "Internal" && echo "yes" || echo "no")
+    is_removable=$(echo "$disk_info" | grep "Removable Media:" | grep -q "Removable" && echo "yes" || echo "no")
+    protocol=$(echo "$disk_info" | grep "Protocol:" | awk -F": " '{print $2}' | xargs)
+    
+    log_debug "  Internal: $is_internal, Removable: $is_removable, Protocol: $protocol"
+    
+    # Skip internal non-removable disks (likely system disks)
+    if [[ "$is_internal" == "yes" ]] && [[ "$is_removable" != "yes" ]]; then
+        log_debug "  Skipping internal non-removable disk"
+        continue
+    fi
+    
+    # Get disk size
+    device_size=$(echo "$disk_info" | grep "Disk Size" | awk -F"(" '{print $2}' | awk '{print $1}')
+    device_size_gb=$((device_size / 1024 / 1024 / 1024))
+    
+    log_debug "  Size: ${device_size_gb} GB"
+    
+    # Skip disks > 2TB (unlikely to be SD cards)
+    if [[ $device_size_gb -gt 2048 ]]; then
+        log_debug "  Skipping: size > 2TB"
+        continue
+    fi
+    
+    # Check for boot partition (Windows_FAT_32 named "boot")
+    has_boot_partition=false
+    while IFS= read -r partition_line; do
+        # Extract fields from diskutil list output: "   1:             Windows_FAT_32 boot                    66.1 MB    disk16s1"
+        part_type=$(echo "$partition_line" | awk '{print $2}')
+        part_name=$(echo "$partition_line" | awk '{print $3}')
+        part_device=$(echo "$partition_line" | awk '{print $NF}')
+        
+        log_debug "    Partition: $part_device, Type: $part_type, Name: $part_name"
+        
+        if [[ "$part_type" == "Windows_FAT_32" ]] && [[ "$part_name" == "boot" ]]; then
+            has_boot_partition=true
+            log_debug "    Found boot partition!"
+            break
+        fi
+    done < <(diskutil list "$disk" | grep -E '^\s+[0-9]+:')
+    
+    if [[ "$has_boot_partition" == "false" ]]; then
+        log_debug "  Skipping: no Windows_FAT_32 'boot' partition found"
+        continue
+    fi
+    
+    # Allow internal SD card readers - check for SD protocol or Secure Digital in device name
+    device_name=$(echo "$disk_info" | grep "Device / Media Name" | awk -F": " '{print $2}' | xargs)
+    is_sd_card=false
+    if [[ "$protocol" == "Secure Digital" ]] || [[ "$protocol" == "SD" ]] || [[ "$device_name" == *"SDXC"* ]] || [[ "$device_name" == *"SD Card"* ]]; then
+        is_sd_card=true
+        log_debug "  Detected as SD card"
+    fi
+    
+    # Check if it's USB, SD card, or removable
+    if [[ "$is_removable" == "yes" ]] || [[ "$protocol" =~ USB|SD ]] || [[ "$is_sd_card" == "true" ]]; then
+        log_debug "  Checking for Raspberry Pi indicators..."
+        
         # Check for Raspberry Pi indicators (multi-factor detection)
         detection_result=$(check_raspberry_pi_indicators "$disk")
         detection_score=$(echo "$detection_result" | cut -d: -f1)
         detection_indicators=$(echo "$detection_result" | cut -d: -f2-)
         
+        log_debug "  Detection score: $detection_score, Indicators: $detection_indicators"
+        
         # Only include devices with sufficient confidence (score >= 4)
         if [[ $detection_score -ge 4 ]]; then
-            # Get device name/label
-            device_name=$(echo "$disk_info" | grep "Device / Media Name" | awk -F": " '{print $2}' | xargs)
             if [[ -z "$device_name" ]]; then
                 device_name="Unknown"
             fi
@@ -220,6 +318,8 @@ for disk in $(diskutil list | grep "^/dev/disk" | awk '{print $1}'); do
             # Get size
             device_size=$(echo "$disk_info" | grep "Disk Size" | awk -F"(" '{print $2}' | awk '{print $1}')
             device_size_human=$(human_size "$device_size")
+            
+            log_debug "  ✓ Added to device list"
             
             # Store device info
             DEVICES[$INDEX]="$disk"
@@ -229,17 +329,29 @@ for disk in $(diskutil list | grep "^/dev/disk" | awk '{print $1}'); do
             DEVICE_INDICATORS[$INDEX]="$detection_indicators"
             
             INDEX=$((INDEX + 1))
+        else
+            log_debug "  Score too low ($detection_score), not a Raspberry Pi SD card"
         fi
+    else
+        log_debug "  Not removable/USB/SD, skipping"
     fi
-done
+done < <(diskutil list | grep -E '^/dev/disk[0-9]+')
+
+echo ""
 
 # Check if any devices were found
 if [[ $INDEX -eq 0 ]]; then
     log_error "No Raspberry Pi SD cards detected."
-    log_info "Please ensure:"
-    log_info "  - The SD card is properly inserted"
-    log_info "  - The SD card is mounted"
-    log_info "  - The SD card contains a Raspberry Pi OS"
+    log_info ""
+    log_info "Troubleshooting:"
+    log_info "  1. Ensure the SD card is properly inserted"
+    log_info "  2. Check if partitions are mounted:"
+    log_info "     Run: diskutil list"
+    log_info "     Look for mounted volumes under your SD card"
+    log_info "  3. Mount the boot partition manually:"
+    log_info "     Run: diskutil mount /dev/diskXs1  (replace X with your disk number)"
+    log_info "  4. Check /Volumes/ for mounted partitions:"
+    log_info "     Run: ls -la /Volumes/"
     log_info ""
     log_info "Detection requires at least 2 of these indicators:"
     log_info "  - cmdline.txt (kernel command line)"
@@ -292,9 +404,14 @@ echo ""
 
 # Verify the selected device is removable/external
 SELECTED_DEVICE_INFO=$(diskutil info "$SELECTED_DEVICE")
-if ! echo "$SELECTED_DEVICE_INFO" | grep -q "Protocol.*USB\|Protocol.*SD"; then
+selected_protocol=$(echo "$SELECTED_DEVICE_INFO" | grep "Protocol:" | awk -F": " '{print $2}' | xargs)
+selected_removable=$(echo "$SELECTED_DEVICE_INFO" | grep "Removable Media:" | grep -q "Removable" && echo "yes" || echo "no")
+
+# Allow USB, SD protocols, or any Secure Digital device, or removable devices
+if [[ "$selected_protocol" != "USB" ]] && [[ "$selected_protocol" != "Secure Digital" ]] && [[ "$selected_protocol" != "SD" ]] && [[ "$selected_removable" != "yes" ]]; then
     log_error "Selected device is not an external/removable device"
-    log_error "For safety, only USB and SD card devices can be cloned"
+    log_error "For safety, only USB, SD card, and removable devices can be cloned"
+    log_error "Device protocol: $selected_protocol, Removable: $selected_removable"
     exit 1
 fi
 
@@ -360,27 +477,17 @@ diskutil unmountDisk "$SELECTED_DEVICE" > /dev/null 2>&1 || true
 
 # Perform the clone using dd with progress
 log_info "Cloning $RAW_DEVICE to $OUTPUT_IMAGE..."
-log_info "Press Ctrl+T to see progress during cloning"
+log_info "Press Ctrl+T to see progress during cloning (macOS feature)"
 log_info "Starting 'dd' operation (requires sudo)..."
+log_info "Using optimized block size: 16MB for maximum throughput"
 echo ""
 
-# Check if pv (pipe viewer) is available for progress bar
-if command -v pv &> /dev/null; then
-    # Use pv to show progress bar
-    log_info "Using progress bar (pv detected)"
-    if ! sudo dd if="$RAW_DEVICE" bs=4m 2>/dev/null | pv -s "$DEVICE_SIZE_BYTES" | dd of="$OUTPUT_IMAGE" bs=4m 2>/dev/null; then
-        log_error "Clone operation failed"
-        rm -f "$OUTPUT_IMAGE" 2>/dev/null
-        exit 1
-    fi
-else
-    # Fallback to standard dd (use Ctrl+T for progress on macOS)
-    log_info "Note: Install 'pv' (brew install pv) for a progress bar"
-    if ! sudo dd if="$RAW_DEVICE" of="$OUTPUT_IMAGE" bs=4m status=progress 2>&1; then
-        log_error "Clone operation failed"
-        rm -f "$OUTPUT_IMAGE" 2>/dev/null
-        exit 1
-    fi
+# Use 16MB block size for optimal throughput on macOS
+# rdisk (raw disk) bypasses system buffering for faster I/O
+if ! sudo dd if="$RAW_DEVICE" of="$OUTPUT_IMAGE" bs=16m status=progress 2>&1; then
+    log_error "Clone operation failed"
+    rm -f "$OUTPUT_IMAGE" 2>/dev/null
+    exit 1
 fi
 
 # Sync to ensure all data is written
