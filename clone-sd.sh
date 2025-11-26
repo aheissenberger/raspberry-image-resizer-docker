@@ -47,7 +47,8 @@ Examples:
 
 Notes:
   - This script will scan all mounted external devices for Raspberry Pi SD cards
-  - It looks for 'cmdline.txt' to identify Raspberry Pi boot partitions
+  - Uses multi-factor detection (cmdline.txt, config.txt, start.elf, overlays/)
+  - Requires at least 2 Raspberry Pi indicators to identify a valid SD card
   - You will be prompted to select which device to clone
   - The cloning process can take several minutes to hours depending on SD card size
 
@@ -118,27 +119,65 @@ human_size() {
     fi
 }
 
-# Function to check if device has cmdline.txt
-check_for_cmdline() {
+# Function to check if device is a Raspberry Pi SD card using multi-factor detection
+# Returns: score (0-7) indicating confidence level
+check_raspberry_pi_indicators() {
     local device=$1
+    local score=0
+    local indicators=""
     
-    # Get all mounted volumes for this device
-    local volumes=$(diskutil info "$device" 2>/dev/null | grep "Mount Point" | awk -F": " '{print $2}')
-    
-    # Check each partition
+    # Check each partition mounted from this device
     for part in /Volumes/*; do
         if [[ -d "$part" ]]; then
             # Check if this volume belongs to our device
             local vol_dev=$(diskutil info "$part" 2>/dev/null | grep "Device Node" | awk '{print $3}')
             if [[ "$vol_dev" == ${device}s* ]] || [[ "$vol_dev" == "$device" ]]; then
+                
+                # Primary indicators (weighted higher)
                 if [[ -f "$part/cmdline.txt" ]]; then
-                    return 0
+                    ((score += 2))
+                    indicators="${indicators}cmdline.txt "
+                fi
+                
+                if [[ -f "$part/config.txt" ]]; then
+                    ((score += 2))
+                    indicators="${indicators}config.txt "
+                fi
+                
+                if [[ -f "$part/start.elf" ]] || [[ -f "$part/start4.elf" ]]; then
+                    ((score += 2))
+                    indicators="${indicators}start.elf "
+                fi
+                
+                if [[ -d "$part/overlays" ]]; then
+                    ((score += 2))
+                    indicators="${indicators}overlays/ "
+                fi
+                
+                # Secondary indicators (weighted lower)
+                if [[ -f "$part/bootcode.bin" ]]; then
+                    ((score += 1))
+                    indicators="${indicators}bootcode.bin "
+                fi
+                
+                if ls "$part"/kernel*.img &>/dev/null; then
+                    ((score += 1))
+                    indicators="${indicators}kernel.img "
+                fi
+                
+                if ls "$part"/bcm27*.dtb &>/dev/null; then
+                    ((score += 1))
+                    indicators="${indicators}dtb-files "
                 fi
             fi
         fi
     done
     
-    return 1
+    # Export score and indicators for caller
+    echo "$score:$indicators"
+    
+    # Return success if score >= 4 (at least 2 primary indicators)
+    [[ $score -ge 4 ]]
 }
 
 # Scan for external devices
@@ -149,6 +188,7 @@ declare -a DEVICES
 declare -a DEVICE_NAMES
 declare -a DEVICE_SIZES
 declare -a DEVICE_PATHS
+declare -a DEVICE_INDICATORS
 
 INDEX=0
 
@@ -164,8 +204,13 @@ for disk in $(diskutil list | grep "^/dev/disk" | awk '{print $1}'); do
     is_removable=$(echo "$disk_info" | grep -E "Removable Media:|Protocol:" | grep -q "Yes\|USB\|SD" && echo "yes" || echo "no")
     
     if [[ "$is_removable" == "yes" ]] && echo "$disk_info" | grep -q "Protocol.*USB\|Protocol.*SD"; then
-        # Check for cmdline.txt
-        if check_for_cmdline "$disk"; then
+        # Check for Raspberry Pi indicators (multi-factor detection)
+        detection_result=$(check_raspberry_pi_indicators "$disk")
+        detection_score=$(echo "$detection_result" | cut -d: -f1)
+        detection_indicators=$(echo "$detection_result" | cut -d: -f2-)
+        
+        # Only include devices with sufficient confidence (score >= 4)
+        if [[ $detection_score -ge 4 ]]; then
             # Get device name/label
             device_name=$(echo "$disk_info" | grep "Device / Media Name" | awk -F": " '{print $2}' | xargs)
             if [[ -z "$device_name" ]]; then
@@ -181,6 +226,7 @@ for disk in $(diskutil list | grep "^/dev/disk" | awk '{print $1}'); do
             DEVICE_NAMES[$INDEX]="$device_name"
             DEVICE_SIZES[$INDEX]="$device_size_human"
             DEVICE_PATHS[$INDEX]="$disk"
+            DEVICE_INDICATORS[$INDEX]="$detection_indicators"
             
             INDEX=$((INDEX + 1))
         fi
@@ -193,18 +239,26 @@ if [[ $INDEX -eq 0 ]]; then
     log_info "Please ensure:"
     log_info "  - The SD card is properly inserted"
     log_info "  - The SD card is mounted"
-    log_info "  - The SD card contains a Raspberry Pi OS (has cmdline.txt)"
+    log_info "  - The SD card contains a Raspberry Pi OS"
+    log_info ""
+    log_info "Detection requires at least 2 of these indicators:"
+    log_info "  - cmdline.txt (kernel command line)"
+    log_info "  - config.txt (firmware configuration)"
+    log_info "  - start.elf or start4.elf (GPU firmware)"
+    log_info "  - overlays/ directory (device tree overlays)"
     exit 1
 fi
 
 # Display detected devices
 log_info "Detected Raspberry Pi SD cards:"
 echo ""
-printf "%5s  %-15s  %-30s  %s\n" "Index" "Device" "Name" "Size"
-printf "%5s  %-15s  %-30s  %s\n" "-----" "---------------" "------------------------------" "----------"
+printf "%5s  %-15s  %-30s  %-10s  %s\n" "Index" "Device" "Name" "Size" "Indicators"
+printf "%5s  %-15s  %-30s  %-10s  %s\n" "-----" "---------------" "------------------------------" "----------" "------------------------"
 
 for i in "${!DEVICES[@]}"; do
-    printf "%5s  %-15s  %-30s  %s\n" "[$i]" "${DEVICE_PATHS[$i]}" "${DEVICE_NAMES[$i]}" "${DEVICE_SIZES[$i]}"
+    # Truncate indicators if too long
+    indicators_short=$(echo "${DEVICE_INDICATORS[$i]}" | cut -c1-50)
+    printf "%5s  %-15s  %-30s  %-10s  %s\n" "[$i]" "${DEVICE_PATHS[$i]}" "${DEVICE_NAMES[$i]}" "${DEVICE_SIZES[$i]}" "$indicators_short"
 done
 
 echo ""
@@ -225,12 +279,14 @@ done
 SELECTED_DEVICE="${DEVICES[$SELECTION]}"
 SELECTED_NAME="${DEVICE_NAMES[$SELECTION]}"
 SELECTED_SIZE="${DEVICE_SIZES[$SELECTION]}"
+SELECTED_INDICATORS="${DEVICE_INDICATORS[$SELECTION]}"
 
 echo ""
 log_info "Selected device:"
 log_info "  Device: $SELECTED_DEVICE"
 log_info "  Name: $SELECTED_NAME"
 log_info "  Size: $SELECTED_SIZE"
+log_info "  Detected files: $SELECTED_INDICATORS"
 log_info "  Output: $OUTPUT_IMAGE"
 echo ""
 

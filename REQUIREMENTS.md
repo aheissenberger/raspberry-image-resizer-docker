@@ -186,12 +186,22 @@ clone-sd.sh <output-image-path>
 The tool must:
 
 1. Scan all mounted external devices (removable media)
-2. Check each device for the presence of `cmdline.txt` file (indicator of Raspberry Pi boot partition)
+2. Check each device for Raspberry Pi indicators using a multi-factor detection approach:
+   - **Primary indicators** (any 2 required):
+     - `cmdline.txt` - Kernel command line parameters
+     - `config.txt` - Raspberry Pi firmware configuration
+     - `start.elf` or `start4.elf` - GPU firmware binary
+     - `overlays/` directory - Device tree overlays
+   - **Secondary indicators** (optional confirmations):
+     - `bootcode.bin` - First stage bootloader
+     - `kernel*.img` - Linux kernel files
+     - `bcm27*.dtb` - Device tree blobs
 3. Display a numbered list of detected Raspberry Pi SD cards showing:
    - Index number
    - Device path (e.g., `/dev/disk2`)
    - Device name/label
    - Total size
+   - Detection confidence (number of indicators found)
 4. Prompt user to enter the index number to select the device
 5. Confirm the selection before proceeding
 6. Use `dd` to clone the entire device to the specified output image file
