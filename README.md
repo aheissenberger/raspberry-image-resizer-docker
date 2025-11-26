@@ -9,8 +9,10 @@ A **cross-platform, safe, reproducible** solution for resizing and modifying Ras
 - ✅ **Cross-platform**: Works on macOS (Intel & Apple Silicon) using Docker
 - ✅ **Reproducible**: Uses pinned Docker images for consistent results
 - ✅ **Boot partition resizing**: Adjust FAT32 boot partition size
+- ✅ **Automatic optimization**: Intelligently shrinks root partition when needed to avoid disk expansion
+- ✅ **Partition moving**: Automatically moves partitions to make room for boot expansion
 - ✅ **File preservation**: Backs up and restores all boot files
-- ✅ **Optional ext4 resize**: Opt-in support for root partition resizing
+- ✅ **Optional ext4 resize**: Opt-in support for manual root partition resizing
 - ✅ **Dry-run mode**: Preview changes before applying them
 
 ## Requirements
@@ -141,11 +143,14 @@ The `clone-sd.sh` script creates disk images from physical Raspberry Pi SD cards
 2. **Docker Launch**: Starts privileged Linux container with image mounted
 3. **Loop Device**: Attaches image as `/dev/loop0` inside container
 4. **Partition Analysis**: Examines partition table and filesystems
-5. **Boot Backup**: Copies all files from boot partition (FAT32)
-6. **Partition Resize**: Adjusts partition boundaries using `parted`
-7. **Filesystem Creation**: Creates new FAT32 filesystem with `mkfs.vfat`
-8. **File Restoration**: Restores backed-up boot files
-9. **Cleanup**: Unmounts filesystems and detaches loop devices
+5. **Usage Detection**: Checks actual filesystem usage to determine if shrinking is beneficial
+6. **Automatic Shrinking**: Shrinks root filesystem and partition if needed (avoids disk expansion)
+7. **Boot Backup**: Copies all files from boot partition (FAT32)
+8. **Partition Moving**: Uses `parted move` to relocate root partition data forward automatically
+9. **Partition Resize**: Adjusts boot partition boundaries using `fdisk`
+10. **Filesystem Creation**: Creates new FAT32 filesystem with `mkfs.vfat`
+11. **File Restoration**: Restores backed-up boot files
+12. **Cleanup**: Unmounts filesystems and detaches loop devices
 
 ## Safety Features
 
@@ -275,7 +280,12 @@ dd: /dev/rdisk2: Permission denied
 - FAT32 resizing is destructive (requires backup/restore)
 - Some unusual partition layouts (NOOBS, multi-boot) may not be supported
 - Boot partition must be FAT32 (vfat)
-- Root partition must be ext4 for resize operations
+- Root partition must be ext4 for automatic shrinking and move operations
+- Cannot shrink root partition if filesystem usage exceeds 80% of current size
+- Partition moving operations are time-consuming for large filesystems:
+  - 10GB partition: ~5-10 minutes
+  - 30GB partition: ~15-30 minutes
+  - Uses `parted move` for efficient data relocation
 
 ## Advanced Usage
 

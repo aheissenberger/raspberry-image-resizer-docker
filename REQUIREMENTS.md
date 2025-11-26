@@ -15,7 +15,9 @@ The goal of this project is to provide a **cross‑platform, safe, reproducible*
 This approach ensures:
 - No need for a full Linux VM.
 - No macOS filesystem limitations (no native ext4 support).
-- Full access to Linux tooling (`losetup`, `parted`, `e2fsck`, `resize2fs`, `mkfs.vfat`, etc.).
+- Full access to Linux tooling (`losetup`, `parted`, `e2fsck`, `resize2fs`, `mkfs.vfat`, `kpartx`, etc.).
+- **Complete partition manipulation capabilities**: The Linux container environment enables moving, resizing, and reorganizing partitions without the restrictions of macOS disk utilities.
+- **Advanced filesystem operations**: Direct access to ext4 tools allows safe resizing, checking, and repairing of Linux filesystems.
 
 ---
 
@@ -124,18 +126,40 @@ The container must:
 ### **FR-6: Partition Table Modification**
 The tool must support:
 
-- Expanding boot partition size (if free space exists).
-- Recreating FAT32 partition when required.
-- Adjusting partition boundaries using `parted`:
+- **Expanding boot partition size** (if free space exists after root partition)
+- **Automatic root partition shrinking** when needed:
+  - Detects when boot expansion requires moving root partition
+  - Checks actual filesystem usage of root partition
+  - Calculates minimum safe size (used space × 1.2 + 500MB buffer)
+  - Automatically shrinks root partition before moving if needed
+  - Eliminates the need to manually expand disk images in most cases
+- **Moving and resizing partitions** using full Linux container capabilities:
+  - Can move the root partition to make room for boot partition expansion
+  - Uses `parted move` command to automatically relocate partition data
+  - Can resize partitions as long as sufficient disk space exists
+  - Uses `parted` for partition boundary manipulation
+  - Uses `kpartx` for partition device mapping when needed
+  - Falls back to manual `dd` copy if `parted move` fails
+- **Recreating FAT32 partition** when required
+- **Adjusting partition boundaries** using `parted`:
 
 ```
 parted /dev/loop0 resizepart 1 <new-end>
+parted /dev/loop0 move 2 <new-start>  # Moves both data and partition table entry
 ```
 
-If the requested size overlaps with another partition:
+The Linux container environment enables:
+- Full partition table manipulation (MBR/DOS and GPT)
+- Moving partitions with automatic data relocation using `parted move`
+- Resizing ext4 filesystems online or offline
+- Complex multi-partition operations
+- Intelligent space optimization based on actual usage
+- Fallback to manual data copy with `dd` if needed
 
-- Abort with a clear error
-- Do NOT modify the root partition unless `--unsafe-resize-ext4` is provided
+Space management:
+- If boot expansion requires moving root, the tool automatically checks if shrinking is beneficial
+- Only requires disk expansion if root filesystem is genuinely too full to shrink
+- Do NOT modify the root partition unless `--unsafe-resize-ext4` is provided or automatic shrinking is needed
 
 ---
 
@@ -152,15 +176,44 @@ After modifying partition 1:
 
 ---
 
-### **FR-8: (Optional) Root Partition Resize**
-Only when `--unsafe-resize-ext4` is explicitly enabled:
+### **FR-8: Root Partition Resize**
 
-- Resize ext4 via `resize2fs`
-- Adjust partition boundaries via `parted`
-- Run full filesystem checks:
+**Automatic Shrinking (enabled by default when needed):**
+When boot partition expansion requires moving the root partition:
+
+- **Check filesystem usage** by mounting and running `df`
+- **Calculate minimum safe size**: (used space × 1.2) + 500MB buffer
+- **Automatically shrink** if moving would exceed disk capacity:
   ```
   e2fsck -f /dev/loop0p2
+  resize2fs /dev/loop0p2 <calculated-size>M
+  fdisk - update partition table
   ```
+- **Move partition** to new location after shrinking
+- **Expand filesystem** to fill new partition size if it grew
+
+**Manual Operations (only when `--unsafe-resize-ext4` is explicitly enabled):**
+
+- **Shrink ext4 filesystem** before reducing partition size:
+  ```
+  e2fsck -f /dev/loop0p2
+  resize2fs /dev/loop0p2 <new-size>
+  ```
+- **Expand ext4 filesystem** after increasing partition size:
+  ```
+  resize2fs /dev/loop0p2
+  ```
+- **Adjust partition boundaries** via `parted`:
+  ```
+  parted /dev/loop0 resizepart 2 <new-end>
+  ```
+
+The Linux container provides full capabilities for:
+- Offline ext4 filesystem operations (shrink, expand, check)
+- Moving ext4 partitions to different disk locations
+- Modifying partition table without data loss (when sufficient space exists)
+- Running comprehensive filesystem integrity checks before and after operations
+- Intelligent automatic optimization based on actual filesystem usage
 
 ---
 
@@ -258,8 +311,21 @@ Tool must:
 ## 6. Risks & Limitations
 
 - Docker on macOS cannot access raw block devices (e.g., `/dev/disk2`) — only `.img` files.
+  - **Workaround**: Use `clone-sd.sh` to first clone SD card to `.img` file, then manipulate the image.
 - FAT resizing is destructive; partition files must be backed up and restored.
 - Some images may have unusual partition layouts (NOOBS, multi-boot).
+- **Partition movement operations**:
+  - Moving partitions requires sufficient free space on the disk image.
+  - **Automatic optimization**: The tool detects when shrinking root before moving eliminates the need for image expansion.
+  - Uses `parted move` to automatically relocate both partition table and filesystem data.
+  - Falls back to `dd` for manual data copy if `parted move` is unavailable or fails.
+  - Moving ext4 partitions is safe but time-consuming for large filesystems (can take 10+ minutes for 10GB+).
+  - Most boot expansion operations complete without requiring manual disk image expansion.
+- **Filesystem resizing constraints**:
+  - ext4 can only be shrunk to the size of its current data usage (plus 20% safety buffer and 500MB).
+  - FAT32 partitions must be recreated to resize (data backup/restore required).
+  - Filesystem check (`e2fsck`) is mandatory before shrinking ext4 partitions.
+  - Automatic shrinking only occurs when necessary to fit partitions within existing disk space.
 
 ---
 
@@ -283,7 +349,20 @@ Tool must:
 - GUI frontend (Electron or Swift)
 - Support for GPT‑based Raspberry Pi OS variants
 - Verification mode: run `fsck` after each operation
-- Image shrink functionality
+- Image shrink functionality (automatically shrink image to minimum required size)
+- **Advanced partition operations**:
+  - Automatic partition defragmentation and optimization
+  - Support for moving multiple partitions in a single operation
+  - Intelligent space allocation based on partition usage
+  - Conversion between MBR and GPT partition tables
+- **Filesystem features**:
+  - Support for additional filesystems (Btrfs, XFS, F2FS)
+  - Filesystem UUID and label management
+  - Clone and merge multiple image files
+- **Performance improvements**:
+  - Parallel operations for independent partition modifications
+  - Sparse file support for faster cloning
+  - Progress tracking with ETA for long operations
 
 ---
 
