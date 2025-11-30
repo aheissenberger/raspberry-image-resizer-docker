@@ -10,14 +10,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install all required tools for partition manipulation and filesystem operations
 # In Ubuntu 24.04, fdisk is in the fdisk package (separate from util-linux)
-RUN apt-get update && apt-get install -y \
-    parted \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     fdisk \
     util-linux \
     kpartx \
     e2fsprogs \
     dosfstools \
-    file \
     rsync \
     && rm -rf /var/lib/apt/lists/*
 
@@ -29,7 +27,8 @@ WORKDIR /work
 
 # Copy the internal worker script
 COPY src/resize-worker.sh /usr/local/bin/resize-worker.sh
-RUN chmod +x /usr/local/bin/resize-worker.sh
+COPY src/test-create-and-resize.sh /usr/local/bin/test-create-and-resize.sh
+RUN chmod +x /usr/local/bin/resize-worker.sh /usr/local/bin/test-create-and-resize.sh
 
 # Default command
 ENTRYPOINT ["/usr/local/bin/resize-worker.sh"]

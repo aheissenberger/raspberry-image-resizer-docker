@@ -138,8 +138,8 @@ fi
 log_info "Step 2: Examining partition layout..."
 
 if [[ "$DRY_RUN" != "1" ]]; then
-    log_debug "Partition table:"
-    fdisk -l "$LOOP_DEVICE" || true
+    log_debug "Partition table (sfdisk dump):"
+    sfdisk -d "$LOOP_DEVICE" || true
     echo ""
     
     # Check if partitions are detected
@@ -220,11 +220,40 @@ BOOT_SIZE_SECTORS=$((BOOT_SIZE_BYTES / 512))
 
 if [[ "$DRY_RUN" != "1" ]]; then
     # Get current partition information
-    BOOT_START=$(fdisk -l "$LOOP_DEVICE" | grep "${LOOP_DEVICE}p1" | awk '{print $2}')
-    BOOT_CURRENT_END=$(fdisk -l "$LOOP_DEVICE" | grep "${LOOP_DEVICE}p1" | awk '{print $3}')
-    ROOT_START=$(fdisk -l "$LOOP_DEVICE" | grep "${LOOP_DEVICE}p2" | awk '{print $2}')
-    ROOT_END=$(fdisk -l "$LOOP_DEVICE" | grep "${LOOP_DEVICE}p2" | awk '{print $3}')
-    DISK_SIZE_SECTORS=$(fdisk -l "$LOOP_DEVICE" | grep "^Disk $LOOP_DEVICE" | awk '{print $7}')
+    pt_dump=$(sfdisk -d "$LOOP_DEVICE" 2>/dev/null || true)
+    p1_line=$(echo "$pt_dump" | grep -E '^/dev/.+p1[[:space:]]:')
+    p2_line=$(echo "$pt_dump" | grep -E '^/dev/.+p2[[:space:]]:')
+    BOOT_START=$(echo "$p1_line" | sed -n 's/.*start=\s*\([0-9]\+\),.*/\1/p')
+    BOOT_SIZE_SECTORS_ACTUAL=$(echo "$p1_line" | sed -n 's/.*size=\s*\([0-9]\+\),.*/\1/p')
+    ROOT_START=$(echo "$p2_line" | sed -n 's/.*start=\s*\([0-9]\+\),.*/\1/p')
+    ROOT_SIZE_SECTORS_ACTUAL=$(echo "$p2_line" | sed -n 's/.*size=\s*\([0-9]\+\),.*/\1/p')
+    
+    if [[ -z "$BOOT_START" || -z "$BOOT_SIZE_SECTORS_ACTUAL" || -z "$ROOT_START" || -z "$ROOT_SIZE_SECTORS_ACTUAL" ]]; then
+        log_error "Failed to parse partition table via sfdisk"
+        log_debug "sfdisk dump:\n$pt_dump"
+        exit 1
+    fi
+    BOOT_CURRENT_END=$((BOOT_START + BOOT_SIZE_SECTORS_ACTUAL - 1))
+    ROOT_END=$((ROOT_START + ROOT_SIZE_SECTORS_ACTUAL - 1))
+
+    # Sanity guard: ensure distinct starts parsed from sfdisk dump
+    if [[ "$BOOT_START" == "$ROOT_START" ]]; then
+        log_error "Parsed BOOT_START and ROOT_START are equal ($BOOT_START) — invalid layout parsing"
+        log_debug "sfdisk dump:\n$pt_dump"
+        exit 1
+    fi
+
+    # Validate fallback success
+    for v in BOOT_START BOOT_CURRENT_END ROOT_START ROOT_END; do
+        if [[ -z "${!v}" ]]; then
+            log_error "Failed to determine partition metric: $v"
+            exit 1
+        fi
+    done
+    # Get total disk sectors without fdisk (blockdev reports 512-byte sectors)
+    DISK_SIZE_SECTORS=$(blockdev --getsz "$LOOP_DEVICE")
+
+    log_debug "Parsed metrics: BOOT_START=${BOOT_START} BOOT_CURRENT_END=${BOOT_CURRENT_END} ROOT_START=${ROOT_START} ROOT_END=${ROOT_END} DISK_SIZE_SECTORS=${DISK_SIZE_SECTORS}"
     
     BOOT_CURRENT_SIZE_SECTORS=$((BOOT_CURRENT_END - BOOT_START + 1))
     BOOT_CURRENT_SIZE_MB=$((BOOT_CURRENT_SIZE_SECTORS * 512 / 1024 / 1024))
@@ -288,7 +317,8 @@ if [[ "$DRY_RUN" != "1" ]]; then
         umount /mnt/root
         
         # Calculate minimum required root partition size (add 20% buffer + 500MB for safety)
-        MIN_ROOT_SIZE_MB=$((ROOT_FS_USED_MB * 120 / 100 + 500))
+        # Calculate minimum required root partition size (20% headroom + 100MB buffer)
+        MIN_ROOT_SIZE_MB=$((ROOT_FS_USED_MB * 120 / 100 + 100))
         
         log_info "Minimum root partition size: ${MIN_ROOT_SIZE_MB}MB (with 20% buffer + 500MB)"
         
@@ -349,8 +379,8 @@ fi
 
 # Step 5: Shrink root partition if necessary
 if [[ "$NEEDS_ROOT_SHRINK" == "true" ]]; then
-    log_info "Step 5: Shrinking root partition..."
-    
+    log_info "Step 5: Shrinking root partition (sfdisk)..."
+
     if [[ "$DRY_RUN" != "1" ]]; then
         # Check filesystem before shrinking
         log_info "Running filesystem check before shrinking..."
@@ -358,50 +388,54 @@ if [[ "$NEEDS_ROOT_SHRINK" == "true" ]]; then
             log_error "Filesystem check failed - cannot safely shrink partition"
             exit 1
         }
-        
+
         # Shrink filesystem first
         log_info "Shrinking filesystem to ${TARGET_ROOT_SIZE_MB}MB..."
         resize2fs "$ROOT_PART" "${TARGET_ROOT_SIZE_MB}M" || {
             log_error "Filesystem shrink failed"
             exit 1
         }
-        
-        # Update partition table with new size
-        log_info "Updating partition table with new size..."
+
+        # Prepare new partition table (boot unchanged, root smaller)
         NEW_ROOT_END_SHRUNK=$((ROOT_START + ROOT_NEW_SIZE_SECTORS - 1))
-        
-        {
-            echo d      # delete partition
-            echo 2      # partition 2
-            echo n      # new partition
-            echo p      # primary
-            echo 2      # partition number
-            echo $ROOT_START  # keep current start
-            echo $NEW_ROOT_END_SHRUNK    # new end sector
-            echo w      # write changes
-        } | fdisk "$LOOP_DEVICE" > /dev/null 2>&1
-        
-        # Reread partition table
+        CURRENT_BOOT_SIZE_SECTORS=$((BOOT_CURRENT_END - BOOT_START + 1))
+
+        cat > /tmp/shrink-layout.sfdisk <<EOF
+label: dos
+unit: sectors
+
+${LOOP_DEVICE}p1 : start=${BOOT_START}, size=${CURRENT_BOOT_SIZE_SECTORS}, type=c, bootable
+${LOOP_DEVICE}p2 : start=${ROOT_START}, size=${ROOT_NEW_SIZE_SECTORS}, type=83
+EOF
+
+        log_debug "Applying shrunk root partition table via sfdisk"
+        if ! sfdisk --force --no-reread "$LOOP_DEVICE" < /tmp/shrink-layout.sfdisk 2>/tmp/sfdisk-shrink.log; then
+            log_error "sfdisk failed during shrink"
+            log_debug "sfdisk shrink output:"; cat /tmp/sfdisk-shrink.log
+            exit 1
+        fi
+
         partprobe "$LOOP_DEVICE" 2>/dev/null || true
+        blockdev --rereadpt "$LOOP_DEVICE" 2>/dev/null || true
         kpartx -dv "$LOOP_DEVICE" 2>/dev/null || true
         kpartx -av "$LOOP_DEVICE" 2>/dev/null || true
         sleep 2
-        
+
         # Update ROOT_PART reference if using mapper
-        if [[ "$ROOT_PART" == "/dev/mapper/"* ]]; then
+        if [[ -e "/dev/mapper/$(basename ${LOOP_DEVICE})p2" ]]; then
             ROOT_PART="/dev/mapper/$(basename ${LOOP_DEVICE})p2"
         else
             ROOT_PART="${LOOP_DEVICE}p2"
         fi
-        
+
         # Verify filesystem after partition resize
         e2fsck -f -y "$ROOT_PART" || {
             log_error "Filesystem check failed after partition resize"
             exit 1
         }
-        
+
         log_info "Root partition shrunk successfully to ${TARGET_ROOT_SIZE_MB}MB"
-        
+
         # Update ROOT_END for subsequent operations
         ROOT_END=$NEW_ROOT_END_SHRUNK
         ROOT_SIZE_SECTORS=$ROOT_NEW_SIZE_SECTORS
@@ -413,92 +447,119 @@ else
     log_info "Step 5: Root partition does not need to be shrunk"
 fi
 
-# Step 5b: Move root partition if necessary
+# Step 5b: Move root partition if necessary (overlap-safe)
 if [[ "$NEEDS_ROOT_MOVE" == "true" ]]; then
     log_info "Step 5b: Moving root partition..."
     log_warn "This may take several minutes depending on partition size..."
-    
+
     if [[ "$DRY_RUN" != "1" ]]; then
-        # Check filesystem before moving
+        # Ensure root not mounted
+        if mountpoint -q /mnt/root 2>/dev/null; then
+            umount /mnt/root || { log_error "Cannot unmount root before move"; exit 1; }
+        fi
+
         log_info "Running filesystem check before moving..."
-        e2fsck -f -y "$ROOT_PART" || {
-            log_error "Filesystem check failed - cannot safely move partition"
-            exit 1
-        }
-        
-        # Calculate new position in MB (parted uses MB)
-        ROOT_NEW_START_MB=$((ROOT_NEW_START * 512 / 1024 / 1024))
-        ROOT_NEW_END_MB=$((ROOT_NEW_END * 512 / 1024 / 1024))
-        
-        log_info "Moving partition 2 to ${ROOT_NEW_START_MB}MB-${ROOT_NEW_END_MB}MB..."
-        
-        # Use parted to move the partition (this moves both partition table entry and data)
-        parted -s "$LOOP_DEVICE" unit s move 2 ${ROOT_NEW_START} || {
-            log_error "Failed to move root partition with parted"
-            log_info "Attempting manual move with dd..."
-            
-            # Fallback: manual copy with dd
-            OLD_ROOT_START=$ROOT_START
-            COPY_SIZE_MB=$((ROOT_SIZE_MB))
-            
-            log_info "Copying ${COPY_SIZE_MB}MB from sector ${OLD_ROOT_START} to ${ROOT_NEW_START}..."
-            
-            dd if="$LOOP_DEVICE" of="$LOOP_DEVICE" \
-               bs=1M \
-               skip=$((OLD_ROOT_START * 512 / 1024 / 1024)) \
-               seek=$((ROOT_NEW_START * 512 / 1024 / 1024)) \
-               count=${COPY_SIZE_MB} \
-               conv=notrunc,fsync \
-               status=progress || {
-                   log_error "Failed to copy partition data"
-                   exit 1
-               }
-            
-            # Update partition table after manual copy
-            {
-                echo d      # delete partition
-                echo 2      # partition 2
-                echo n      # new partition
-                echo p      # primary
-                echo 2      # partition number
-                echo $ROOT_NEW_START  # new start sector
-                echo $ROOT_NEW_END    # new end sector
-                echo w      # write changes
-            } | fdisk "$LOOP_DEVICE" > /dev/null 2>&1
-        }
-        
-        # Reread partition table
-        partprobe "$LOOP_DEVICE" 2>/dev/null || true
+        e2fsck -f -y "$ROOT_PART" || { log_error "Filesystem check failed - cannot move"; exit 1; }
+
+        OLD_ROOT_START=$ROOT_START
+        OLD_ROOT_END=$ROOT_END
+        NEW_ROOT_START=$ROOT_NEW_START
+        NEW_ROOT_END=$ROOT_NEW_END
+        COPY_SIZE_SECTORS=$ROOT_SIZE_SECTORS
+
+        log_info "Moving partition 2 from sectors ${OLD_ROOT_START}-${OLD_ROOT_END} to ${NEW_ROOT_START}-${NEW_ROOT_END}"
+
+        DEST_END=$((NEW_ROOT_START + COPY_SIZE_SECTORS - 1))
+        OVERLAPS=false
+        if [[ $NEW_ROOT_START -le $OLD_ROOT_END && $DEST_END -ge $OLD_ROOT_START ]]; then
+            OVERLAPS=true
+        fi
+
+        if [[ $OVERLAPS == true ]]; then
+            log_warn "Source and destination overlap – performing backward copy"
+            BLOCK_SECTORS=128
+            REMAIN=$COPY_SIZE_SECTORS
+            PROGRESS=0
+            while [[ $REMAIN -gt 0 ]]; do
+                CUR=$(( REMAIN < BLOCK_SECTORS ? REMAIN : BLOCK_SECTORS ))
+                OFFSET_FROM_END=$((PROGRESS + CUR))
+                SRC_START=$((OLD_ROOT_END - OFFSET_FROM_END + 1))
+                DST_START=$((NEW_ROOT_START + (SRC_START - OLD_ROOT_START)))
+                dd if="$LOOP_DEVICE" of="$LOOP_DEVICE" bs=512 skip=$SRC_START seek=$DST_START count=$CUR conv=notrunc 2>/dev/null || { log_error "Backward copy failed at sector $SRC_START"; exit 1; }
+                PROGRESS=$((PROGRESS + CUR))
+                REMAIN=$((REMAIN - CUR))
+                if (( PROGRESS % (1024*1024) == 0 )); then
+                    PERC=$((PROGRESS * 100 / COPY_SIZE_SECTORS))
+                    log_debug "  Backward copy progress: ${PERC}% (${PROGRESS}/${COPY_SIZE_SECTORS} sectors)"
+                fi
+            done
+        else
+            log_info "No overlap – forward copy via dd"
+            dd if="$LOOP_DEVICE" of="$LOOP_DEVICE" bs=512 skip=$OLD_ROOT_START seek=$NEW_ROOT_START count=$COPY_SIZE_SECTORS conv=notrunc status=progress || { log_error "Forward copy failed"; exit 1; }
+        fi
+
+        log_info "Data copy completed"
+
+        log_debug "Removing kpartx mappings..."
         kpartx -dv "$LOOP_DEVICE" 2>/dev/null || true
+        sleep 1
+
+        log_debug "Detaching loop device..."
+        IMAGE_PATH="/work/$IMAGE_FILE"
+        losetup -d "$LOOP_DEVICE" 2>/dev/null || true
+        sleep 1
+
+        log_debug "Re-attaching loop device..."
+        LOOP_DEVICE=$(losetup -f --show "$IMAGE_PATH") || { log_error "Failed to reattach loop"; exit 1; }
+        log_debug "Reattached loop: $LOOP_DEVICE"
+        sleep 1
+
+        NEW_BOOT_SIZE_SECTORS=$((BOOT_NEW_END - BOOT_START + 1))
+        NEW_ROOT_SIZE_SECTORS=$((NEW_ROOT_END - NEW_ROOT_START + 1))
+
+        cat > /tmp/new-layout.sfdisk <<EOF
+label: dos
+label-id: 0x878f53aa
+unit: sectors
+
+${LOOP_DEVICE}p1 : start=${BOOT_START}, size=${NEW_BOOT_SIZE_SECTORS}, type=c, bootable
+${LOOP_DEVICE}p2 : start=${NEW_ROOT_START}, size=${NEW_ROOT_SIZE_SECTORS}, type=83
+EOF
+
+        log_debug "Applying new partition table via sfdisk"
+        if ! sfdisk --force --no-reread "$LOOP_DEVICE" < /tmp/new-layout.sfdisk 2>/tmp/sfdisk.log; then
+            log_error "sfdisk failed"
+            log_debug "sfdisk output:"; cat /tmp/sfdisk.log
+            exit 1
+        fi
+
+        partprobe "$LOOP_DEVICE" 2>/dev/null || true
+        blockdev --rereadpt "$LOOP_DEVICE" 2>/dev/null || true
+        sleep 1
+
+        log_debug "Recreating kpartx mappings..."
         kpartx -av "$LOOP_DEVICE" 2>/dev/null || true
         sleep 2
-        
-        # Update ROOT_PART reference if using mapper
-        if [[ "$ROOT_PART" == "/dev/mapper/"* ]]; then
+
+        if [[ -e "/dev/mapper/$(basename ${LOOP_DEVICE})p1" ]]; then
+            BOOT_PART="/dev/mapper/$(basename ${LOOP_DEVICE})p1"
             ROOT_PART="/dev/mapper/$(basename ${LOOP_DEVICE})p2"
         else
+            BOOT_PART="${LOOP_DEVICE}p1"
             ROOT_PART="${LOOP_DEVICE}p2"
         fi
-        
-        log_info "Root partition moved to new location"
-        log_info "New location: sectors ${ROOT_NEW_START}-${ROOT_NEW_END}"
-        
-        # Run filesystem check and resize to fill new partition
+
+        [[ -b "$ROOT_PART" ]] || { log_error "Root partition device missing after move"; exit 1; }
+
+        log_info "Root partition now at sectors ${NEW_ROOT_START}-${NEW_ROOT_END}"
         log_info "Verifying filesystem after move..."
-        e2fsck -f -y "$ROOT_PART" || {
-            log_error "Filesystem check failed after move"
-            exit 1
-        }
-        
-        # Expand filesystem if partition grew
-        if [[ $ROOT_NEW_END -gt $ROOT_END ]]; then
-            log_info "Expanding filesystem to fill new partition..."
-            resize2fs "$ROOT_PART" || {
-                log_error "Filesystem resize failed after move"
-                exit 1
-            }
+        e2fsck -f -y "$ROOT_PART" || { log_error "Filesystem check failed after move"; exit 1; }
+
+        if [[ "$NEEDS_ROOT_SHRINK" == "true" ]]; then
+            log_info "Expanding filesystem to fill partition..."
+            resize2fs "$ROOT_PART" || { log_error "Final filesystem expansion failed"; exit 1; }
         fi
-        
+
         log_info "Root partition move completed successfully"
     else
         log_debug "Dry run - root partition move skipped"
@@ -508,42 +569,43 @@ else
 fi
 
 # Step 6: Resize boot partition
-log_info "Step 6: Resizing boot partition..."
+log_info "Step 6: Resizing boot partition (sfdisk)..."
 
 if [[ "$DRY_RUN" != "1" ]]; then
-    # Delete and recreate partition 1 with new size
-    log_debug "Recreating partition table entry for boot partition..."
-    
-    # Use fdisk to delete and recreate boot partition
-    {
-        echo d      # delete partition
-        echo 1      # partition 1
-        echo n      # new partition
-        echo p      # primary
-        echo 1      # partition number
-        echo $BOOT_START  # start sector
-        echo $BOOT_NEW_END    # end sector
-        echo t      # change type
-        echo 1      # partition 1
-        echo c      # W95 FAT32 (LBA)
-        echo w      # write changes
-    } | fdisk "$LOOP_DEVICE" > /dev/null 2>&1
-    
-    # Reread partition table
-    partprobe "$LOOP_DEVICE" 2>/dev/null || true
-    kpartx -dv "$LOOP_DEVICE" 2>/dev/null || true
-    kpartx -av "$LOOP_DEVICE" 2>/dev/null || true
-    sleep 2
-    
+    NEW_BOOT_SIZE_SECTORS=$((BOOT_NEW_END - BOOT_START + 1))
+    # If root was moved, partition table already updated during move step; skip rewrite.
+    if [[ "$NEEDS_ROOT_MOVE" == "true" ]]; then
+        log_info "Boot partition size already set during root move"
+    else
+        ROOT_SIZE_SECTORS_FINAL=$((ROOT_END - ROOT_START + 1))
+        cat > /tmp/boot-resize.sfdisk <<EOF
+label: dos
+unit: sectors
+
+${LOOP_DEVICE}p1 : start=${BOOT_START}, size=${NEW_BOOT_SIZE_SECTORS}, type=c, bootable
+${LOOP_DEVICE}p2 : start=${ROOT_START}, size=${ROOT_SIZE_SECTORS_FINAL}, type=83
+EOF
+        log_debug "Applying boot resize partition table via sfdisk"
+        if ! sfdisk --force --no-reread "$LOOP_DEVICE" < /tmp/boot-resize.sfdisk 2>/tmp/sfdisk-boot.log; then
+            log_error "sfdisk failed during boot resize"
+            log_debug "sfdisk boot output:"; cat /tmp/sfdisk-boot.log
+            exit 1
+        fi
+        partprobe "$LOOP_DEVICE" 2>/dev/null || true
+        blockdev --rereadpt "$LOOP_DEVICE" 2>/dev/null || true
+        kpartx -dv "$LOOP_DEVICE" 2>/dev/null || true
+        kpartx -av "$LOOP_DEVICE" 2>/dev/null || true
+        sleep 2
+    fi
+
     # Update BOOT_PART reference if using mapper
-    if [[ "$BOOT_PART" == "/dev/mapper/"* ]]; then
+    if [[ -e "/dev/mapper/$(basename ${LOOP_DEVICE})p1" ]]; then
         BOOT_PART="/dev/mapper/$(basename ${LOOP_DEVICE})p1"
     else
         BOOT_PART="${LOOP_DEVICE}p1"
     fi
-    
-    log_info "Partition table updated"
-    log_info "New boot partition size: ${BOOT_SIZE_MB}MB"
+
+    log_info "Boot partition size now: ${BOOT_SIZE_MB}MB"
 else
     log_debug "Dry run - partition resize skipped"
 fi
@@ -610,10 +672,10 @@ fi
 log_info "Step 10: Final verification..."
 
 if [[ "$DRY_RUN" != "1" ]]; then
-    log_debug "Final partition layout:"
-    fdisk -l "$LOOP_DEVICE" | grep -E "^Disk|^Device" || true
+    log_debug "Final partition layout (sfdisk dump):"
+    sfdisk -d "$LOOP_DEVICE" || true
     echo ""
-    
+
     log_debug "Filesystem information:"
     blkid "$BOOT_PART" "$ROOT_PART" || true
 else

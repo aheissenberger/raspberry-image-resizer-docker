@@ -15,7 +15,7 @@ The goal of this project is to provide a **cross‑platform, safe, reproducible*
 This approach ensures:
 - No need for a full Linux VM.
 - No macOS filesystem limitations (no native ext4 support).
-- Full access to Linux tooling (`losetup`, `parted`, `e2fsck`, `resize2fs`, `mkfs.vfat`, `kpartx`, etc.).
+- Full access to Linux tooling (`losetup`, `sfdisk`, `e2fsck`, `resize2fs`, `mkfs.vfat`, `kpartx`, `blockdev`, `partprobe`, etc.).
 - **Complete partition manipulation capabilities**: The Linux container environment enables moving, resizing, and reorganizing partitions without the restrictions of macOS disk utilities.
 - **Advanced filesystem operations**: Direct access to ext4 tools allows safe resizing, checking, and repairing of Linux filesystems.
 
@@ -82,13 +82,13 @@ docker run --rm -it --privileged -v "$PWD":/work <image>
 ```
 
 - Use a Docker image that includes:
-  - `parted`
-  - `fdisk`
+  - `sfdisk` (partition table dump/apply)
   - `losetup`
   - `kpartx`
   - `e2fsprogs` (`e2fsck`, `resize2fs`)
   - `dosfstools` (`mkfs.vfat`)
   - `mount/umount`, `blkid`, `lsblk`
+  - `partprobe`, `blockdev`, `rsync`
 
 - Support both Intel and Apple Silicon via multi-arch images.
 
@@ -102,11 +102,11 @@ Inside the Docker container, the system must:
    losetup -Pf /work/image.img
    ```
 2. Detect created partitions via:
-   ```
-   fdisk -l /dev/loop0
-   lsblk /dev/loop0
-   blkid
-   ```
+  ```
+  sfdisk -d /dev/loop0
+  lsblk /dev/loop0
+  blkid
+  ```
 3. Provide clear error messages if:
    - partitions cannot be detected,
    - the image is corrupted,
@@ -130,31 +130,32 @@ The tool must support:
 - **Automatic root partition shrinking** when needed:
   - Detects when boot expansion requires moving root partition
   - Checks actual filesystem usage of root partition
-  - Calculates minimum safe size (used space × 1.2 + 500MB buffer)
+  - Calculates minimum safe size (used space × 1.2 + 100MB buffer)
   - Automatically shrinks root partition before moving if needed
   - Eliminates the need to manually expand disk images in most cases
 - **Moving and resizing partitions** using full Linux container capabilities:
   - Can move the root partition to make room for boot partition expansion
-  - Uses `parted move` command to automatically relocate partition data
-  - Can resize partitions as long as sufficient disk space exists
-  - Uses `parted` for partition boundary manipulation
+  - Uses a robust manual data relocation via `dd` with overlap‑safe backward copy when ranges overlap
+  - Rewrites the partition table using `sfdisk` scripts (dump/apply) for deterministic changes
   - Uses `kpartx` for partition device mapping when needed
-  - Falls back to manual `dd` copy if `parted move` fails
 - **Recreating FAT32 partition** when required
-- **Adjusting partition boundaries** using `parted`:
+- **Adjusting partition boundaries** using `sfdisk`:
 
 ```
-parted /dev/loop0 resizepart 1 <new-end>
-parted /dev/loop0 move 2 <new-start>  # Moves both data and partition table entry
+# Example script applied via sfdisk
+label: dos
+unit: sectors
+
+/dev/loop0p1 : start=<start>, size=<size>, type=c, bootable
+/dev/loop0p2 : start=<start>, size=<size>, type=83
 ```
 
 The Linux container environment enables:
-- Full partition table manipulation (MBR/DOS and GPT)
-- Moving partitions with automatic data relocation using `parted move`
-- Resizing ext4 filesystems online or offline
-- Complex multi-partition operations
+- Deterministic partition table manipulation (MBR/DOS) via `sfdisk`
+- Safe manual data relocation using `dd` with backward copying for overlaps
+- Resizing ext4 filesystems offline
+- Complex multi‑partition operations
 - Intelligent space optimization based on actual usage
-- Fallback to manual data copy with `dd` if needed
 
 Space management:
 - If boot expansion requires moving root, the tool automatically checks if shrinking is beneficial
@@ -182,14 +183,15 @@ After modifying partition 1:
 When boot partition expansion requires moving the root partition:
 
 - **Check filesystem usage** by mounting and running `df`
-- **Calculate minimum safe size**: (used space × 1.2) + 500MB buffer
+- **Calculate minimum safe size**: (used space × 1.2) + 100MB buffer
 - **Automatically shrink** if moving would exceed disk capacity:
   ```
   e2fsck -f /dev/loop0p2
   resize2fs /dev/loop0p2 <calculated-size>M
-  fdisk - update partition table
+  # Update partition table via sfdisk script
+  sfdisk --force --no-reread /dev/loop0 < new-layout.sfdisk
   ```
-- **Move partition** to new location after shrinking
+- **Move partition** to new location after shrinking using overlap‑safe `dd`
 - **Expand filesystem** to fill new partition size if it grew
 
 **Manual Operations (only when `--unsafe-resize-ext4` is explicitly enabled):**
@@ -203,10 +205,7 @@ When boot partition expansion requires moving the root partition:
   ```
   resize2fs /dev/loop0p2
   ```
-- **Adjust partition boundaries** via `parted`:
-  ```
-  parted /dev/loop0 resizepart 2 <new-end>
-  ```
+- **Adjust partition boundaries** via `sfdisk` scripts
 
 The Linux container provides full capabilities for:
 - Offline ext4 filesystem operations (shrink, expand, check)
@@ -336,9 +335,9 @@ Tool must:
 - **Partition movement operations**:
   - Moving partitions requires sufficient free space on the disk image.
   - **Automatic optimization**: The tool detects when shrinking root before moving eliminates the need for image expansion.
-  - Uses `parted move` to automatically relocate both partition table and filesystem data.
-  - Falls back to `dd` for manual data copy if `parted move` is unavailable or fails.
-  - Moving ext4 partitions is safe but time-consuming for large filesystems (can take 10+ minutes for 10GB+).
+  - Uses deterministic `sfdisk` table scripts to rewrite partition entries.
+  - Uses overlap‑safe `dd` backward copy to relocate data when ranges overlap; forward `dd` copy otherwise.
+  - Moving ext4 partitions is safe but time‑consuming for large filesystems (can take 10+ minutes for 10GB+).
   - Most boot expansion operations complete without requiring manual disk image expansion.
 - **Filesystem resizing constraints**:
   - ext4 can only be shrunk to the size of its current data usage (plus 20% safety buffer and 500MB).

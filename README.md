@@ -39,7 +39,7 @@ cd raspberry-image-resizer-docker
 docker build -t rpi-image-resizer:latest .
 ```
 
-This creates a Docker image with all necessary Linux tools (parted, e2fsck, mkfs.vfat, etc.).
+This creates a Docker image with all necessary Linux tools (sfdisk, e2fsck, mkfs.vfat, kpartx, etc.).
 
 ### 3. Resize an Image
 
@@ -171,8 +171,8 @@ The `clone-sd.sh` script handles cloning and writing.
 5. **Usage Detection**: Checks actual filesystem usage to determine if shrinking is beneficial
 6. **Automatic Shrinking**: Shrinks root filesystem and partition if needed (avoids disk expansion)
 7. **Boot Backup**: Copies all files from boot partition (FAT32)
-8. **Partition Moving**: Uses `parted move` to relocate root partition data forward automatically
-9. **Partition Resize**: Adjusts boot partition boundaries using `fdisk`
+8. **Partition Moving**: Relocates root partition data with `dd` (backward copy when regions overlap)
+9. **Partition Resize**: Adjusts boot partition boundaries using `sfdisk` scripts
 10. **Filesystem Creation**: Creates new FAT32 filesystem with `mkfs.vfat`
 11. **File Restoration**: Restores backed-up boot files
 12. **Cleanup**: Unmounts filesystems and detaches loop devices
@@ -340,7 +340,7 @@ Then manually run commands to investigate the image:
 
 ```bash
 losetup -Pf /work/image.img
-fdisk -l /dev/loop0
+sfdisk -d /dev/loop0
 blkid /dev/loop0p1 /dev/loop0p2
 ```
 
@@ -390,7 +390,7 @@ This project is provided as-is for educational and personal use.
 
 ## Acknowledgments
 
-Built with Linux tools: `parted`, `losetup`, `e2fsck`, `resize2fs`, `mkfs.vfat`, and `rsync`.
+Built with Linux tools: `sfdisk`, `losetup`, `kpartx`, `e2fsck`, `resize2fs`, `mkfs.vfat`, `partprobe`, `blockdev`, and `rsync`.
 
 ---
 
