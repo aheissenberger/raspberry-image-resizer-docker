@@ -222,16 +222,30 @@ async function main() {
     try {
       // Create a timestamped backup copy unless dry-run
       const ts = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0,12);
-      const dir = dirname(workImage);
-      const base = basename(workImage);
-      const bare = base.replace(/\.[^.]+$/, "");
-      const backupName = `${bare}_${ts}.img`;
-      let targetImage = base;
+      const srcDir = dirname(image);
+      const imageBase = basename(image);
+      const lastDot = imageBase.lastIndexOf(".");
+      const bareOriginal = lastDot > 0 ? imageBase.slice(0, lastDot) : imageBase;
+      const extOriginal = lastDot > 0 ? imageBase.slice(lastDot) : "";
+
+      // Working copy name (always .img)
+      const workingName = `${bareOriginal}_${ts}.img`;
+      let targetImage = workingName;
 
       if (!args["dry-run"]) {
-        await exec.run(["cp", workImage, `${dir}/${backupName}`]);
-        targetImage = backupName;
-        console.log(`Backup created: ${dir}/${backupName}`);
+        if (algo) {
+          // Backup the compressed source
+          const compressedBackupName = `${bareOriginal}_${ts}${extOriginal}`;
+          await exec.run(["cp", image, `${srcDir}/${compressedBackupName}`]);
+          console.log(`Backup created: ${srcDir}/${compressedBackupName}`);
+          // Create working copy from decompressed temp
+          await exec.run(["cp", workImage, `${srcDir}/${workingName}`]);
+          console.log(`Working copy created: ${srcDir}/${workingName}`);
+        } else {
+          // Uncompressed: single backup/working copy
+          await exec.run(["cp", image, `${srcDir}/${workingName}`]);
+          console.log(`Backup created: ${srcDir}/${workingName}`);
+        }
       } else {
         console.log("Dry-run: not creating backup, operating read-only");
       }
@@ -250,7 +264,7 @@ async function main() {
 
       const result = await runWorker(exec, {
         image: dockerImage,
-        workdir: dir,
+        workdir: srcDir,
         env,
       });
       process.exitCode = result.code;
