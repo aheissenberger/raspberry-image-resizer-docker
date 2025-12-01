@@ -34,18 +34,33 @@ git clone <repository-url>
 cd raspberry-image-resizer-docker
 ```
 
-### 2. Build the Docker Image
+### 2. Install Dependencies
 
 ```bash
-docker build -t rpi-image-resizer:latest .
+bun install
+```
+
+### 3. Build the CLI and Docker Image
+
+```bash
+# Build everything (CLI executable + Docker worker + Docker image)
+bun run build
+bun run docker:build
+
+# The CLI is compiled to a standalone executable:
+# ./dist/rpi-tool (no Bun runtime required on macOS)
 ```
 
 This creates a Docker image with all necessary Linux tools (sfdisk, e2fsck, mkfs.vfat, kpartx, etc.).
 
-### 3. Resize an Image
+### 4. Resize an Image
 
 ```bash
-./resize-image.sh path/to/raspios.img
+# Use the compiled executable (no Bun required)
+./dist/rpi-tool resize path/to/raspios.img
+
+# Or during development with Bun:
+bun run src/cli.ts resize path/to/raspios.img
 ```
 
 This will:
@@ -54,12 +69,12 @@ This will:
 - Preserve all boot files
 - Leave the root partition intact
 
-### 4. Clone or Write an SD Card (Optional)
+### 5. Clone or Write an SD Card (Optional)
 
 If you need to create an image from a physical SD card first:
 
 ```bash
-./clone-sd.sh clone raspios-backup.img
+./dist/rpi-tool clone raspios-backup.img
 ```
 
 This will:
@@ -72,7 +87,7 @@ This will:
 To write an image back to an SD card:
 
 ```bash
-./clone-sd.sh write raspios-backup.img
+./dist/rpi-tool write raspios-backup.img
 ```
 
 This will:
@@ -83,18 +98,18 @@ This will:
 
 ## Usage
 
-### SD Card: Clone & Write
+### SD Card: Clone & Write (Bun CLI)
 
-The `clone-sd.sh` script handles cloning and writing, with optional compression support.
+The combined Bun CLI handles cloning and writing, with optional compression support.
 
 **Clone syntax:**
 ```bash
-./clone-sd.sh clone <output-image-path> [--compress <algorithm>] [--level <1-9|1-19>]
+./dist/rpi-tool clone <output-image-path> [--compress <algorithm>] [--level <1-9|1-19>]
 ```
 
 **Write syntax:**
 ```bash
-./clone-sd.sh write <image-path>
+./dist/rpi-tool write <image-path>
 ```
 
 **Compression options:**
@@ -104,16 +119,16 @@ The `clone-sd.sh` script handles cloning and writing, with optional compression 
 **Compression examples:**
 ```bash
 # Clone with zstd compression (fast, good compression)
-./clone-sd.sh clone raspios-backup.img.zst --compress zstd --level 3
+./dist/rpi-tool clone raspios-backup.img.zst --compress zstd --level 3
 
 # Clone with xz compression (slow, best compression)
-./clone-sd.sh clone raspios-backup.img.xz --compress xz --level 9
+./dist/rpi-tool clone raspios-backup.img.xz --compress xz --level 9
 
 # Clone with gzip compression (moderate speed and compression)
-./clone-sd.sh clone raspios-backup.img.gz --compress gzip --level 6
+./dist/rpi-tool clone raspios-backup.img.gz --compress gzip --level 6
 
 # Write a compressed image (auto-detects .zst/.xz/.gz)
-./clone-sd.sh write raspios-backup.img.zst
+./dist/rpi-tool write raspios-backup.img.zst
 ```
 
 **Clone process:**
@@ -145,12 +160,12 @@ The `clone-sd.sh` script handles cloning and writing, with optional compression 
 
 ---
 
-### Resizing Images
+### Resizing Images (Bun CLI)
 
 ### Basic Syntax
 
 ```bash
-./resize-image.sh <path-to-image> [options]
+./dist/rpi-tool resize <path-to-image> [options]
 ```
 
 ### Options
@@ -168,32 +183,32 @@ The `clone-sd.sh` script handles cloning and writing, with optional compression 
 
 **Resize boot partition to 512MB:**
 ```bash
-./resize-image.sh raspios.img --boot-size 512
+./dist/rpi-tool resize raspios.img --boot-size 512
 ```
 
 **Resize a compressed image (auto-detects .zst/.xz/.gz):**
 ```bash
-./resize-image.sh raspios.img.zst --boot-size 512
+./dist/rpi-tool resize raspios.img.zst --boot-size 512
 ```
 
 **Preview changes without modifying:**
 ```bash
-./resize-image.sh raspios.img --dry-run
+./dist/rpi-tool resize raspios.img --dry-run
 ```
 
 **Expand image and auto-grow root:**
 ```bash
-./resize-image.sh raspios.img --image-size 64GB --boot-size 256
+./dist/rpi-tool resize raspios.img --image-size 64GB --boot-size 256
 ```
 
 **Shrink image (only if safe):**
 ```bash
-./resize-image.sh raspios.img --image-size 600MB --boot-size 64
+./dist/rpi-tool resize raspios.img --image-size 600MB --boot-size 64
 ```
 
 **Verbose output for debugging:**
 ```bash
-./resize-image.sh raspios.img --boot-size 512 --verbose
+./dist/rpi-tool resize raspios.img --boot-size 512 --verbose
 ```
 
 ## How It Works
@@ -255,12 +270,33 @@ macOS Host (Docker Desktop)
 ```
 raspberry-image-resizer-docker/
 ├── Dockerfile                 # Docker image definition
-├── clone-sd.sh               # SD card cloning script (macOS)
-├── resize-image.sh           # Image resizing launcher (macOS)
+├── package.json               # Bun project manifest & build scripts
+├── bunfig.toml                # Bun configuration
+├── tsconfig.json              # TypeScript configuration
 ├── src/
-│   └── resize-worker.sh      # Container worker script (Linux)
-├── REQUIREMENTS.md           # Detailed requirements document
-└── README.md                 # This file
+│   ├── cli.ts                 # Combined CLI (clone/write/resize)
+│   ├── lib/                   # Shared libraries
+│   │   ├── executor.ts        # Async process wrapper
+│   │   ├── args.ts            # Argument parser
+│   │   ├── compress.ts        # Compression utilities
+│   │   └── docker.ts          # Docker invocation wrapper
+│   ├── worker/
+│   │   └── worker.ts          # Container worker (TypeScript)
+│   └── test-helper.ts         # E2E test harness (TypeScript)
+├── tests/                     # Unit tests
+│   ├── args.test.ts           # Argument parsing tests
+│   ├── compress.test.ts       # Compression utilities tests
+│   ├── docker.test.ts         # Docker wrapper tests
+│   └── e2e/                   # End-to-end tests
+│       ├── helpers.ts         # E2E test utilities
+│       ├── resize.test.ts     # Core resize scenarios
+│       └── compression.test.ts # Compression workflow tests
+├── dist/                      # Build output (generated)
+│   ├── rpi-tool               # Standalone CLI executable
+│   └── worker/
+│       └── worker.js          # Built worker for Docker
+├── REQUIREMENTS.md            # Detailed requirements document
+└── README.md                  # This file
 ```
 
 ## Troubleshooting
@@ -405,12 +441,12 @@ sfdisk -d /dev/loop0
 blkid /dev/loop0p1 /dev/loop0p2
 ```
 
-### Running Without Docker
+### Running Without Docker (advanced)
 
-If you have a Linux system with the required tools, you can run the worker script directly:
+If you have a Linux system with all required tools, you can run the TS worker inside the container or directly via Bun (root required for loop/kpartx):
 
 ```bash
-sudo IMAGE_FILE=image.img BOOT_SIZE_MB=256 ./src/resize-worker.sh
+sudo IMAGE_FILE=image.img BOOT_SIZE_MB=256 VERBOSE=1 bun run src/worker/worker.ts
 ```
 
 ### Complete Workflow Example
@@ -419,18 +455,35 @@ Clone an SD card and then resize it:
 
 ```bash
 # Step 1: Clone your SD card to an image
-./clone-sd.sh original-raspios.img
+./dist/rpi-tool clone original-raspios.img
 
 # Step 2: Resize the boot partition in the cloned image
-./resize-image.sh original-raspios.img --boot-size 512
+./dist/rpi-tool resize original-raspios.img --boot-size 512
 
 # Optional: Expand or shrink the overall image and auto-adjust root
-./resize-image.sh original-raspios.img --image-size 64GB --boot-size 256
-./resize-image.sh original-raspios.img --image-size 600MB --boot-size 64
+./dist/rpi-tool resize original-raspios.img --image-size 64GB --boot-size 256
+./dist/rpi-tool resize original-raspios.img --image-size 600MB --boot-size 64
 
 # The resized image will be saved as original-raspios_202511261430.img
 # Original clone remains unchanged
 ```
+
+## Migration from Bash Scripts
+
+If you previously used `clone-sd.sh` and `resize-image.sh`, here's the mapping to the new compiled CLI:
+
+| Old Command | New Command |
+|-------------|-------------|
+| `./clone-sd.sh clone output.img` | `./dist/rpi-tool clone output.img` |
+| `./clone-sd.sh write input.img` | `./dist/rpi-tool write input.img` |
+| `./resize-image.sh image.img --boot-size 512` | `./dist/rpi-tool resize image.img --boot-size 512` |
+
+All features remain the same:
+- Compression support (`--compress`, `--level`)
+- Automatic decompression for `.zst/.xz/.gz` files
+- Image size adjustment (`--image-size`)
+- Dry-run and verbose modes
+- Timestamped backups
 
 ## Contributing
 
@@ -439,7 +492,9 @@ Contributions welcome! Please:
 1. Test changes on both Intel and Apple Silicon Macs if possible
 2. Verify images boot successfully on actual Raspberry Pi hardware
 3. Update documentation for new features
-4. Follow existing code style and error handling patterns
+4. Follow existing TypeScript code style and error handling patterns
+5. Add unit tests using Bun's native test framework
+6. Ensure `bun test` passes before submitting
 
 ## Future Enhancements
 
@@ -463,26 +518,53 @@ Built with Linux tools: `sfdisk`, `losetup`, `kpartx`, `e2fsck`, `resize2fs`, `m
 
 ## Test Suite
 
-### Core Functionality Tests
+### Unit Tests
 
-Run `./run-test.sh` to validate core resize scenarios inside Docker:
+Run unit tests for core utilities:
+
+```bash
+bun run test:unit
+```
+
+Tests cover:
+- Argument parsing
+- Compression detection and command building
+- Docker wrapper utilities
+
+### End-to-End Tests
+
+Run comprehensive E2E tests (requires Docker):
+
+```bash
+# Build CLI and Docker image first
+bun run build
+bun run docker:build
+
+# Run E2E tests
+bun run test:e2e
+```
+
+**Core Functionality Tests** validate resize scenarios inside Docker:
 - Test 1: No image change; boot 64MB→256MB; root shrinks and moves (files preserved)
 - Test 2: Image expands 700MB→1500MB; boot 64MB→256MB; root auto-expands (files preserved)
 - Test 3: Image shrinks 700MB→600MB; boot stays 64MB; shrink validated and applied (files preserved)
 
-### Compression Workflow Tests
-
-Run `./test-compression.sh` to validate compression support across all algorithms:
+**Compression Workflow Tests** validate compression support across all algorithms:
 - **Tool Validation**: Verifies zstd, xz, and gzip are available
 - **Level Validation**: Tests compression level bounds (zstd: 1-19, xz/gzip: 1-9)
 - **Detection Tests**: Validates automatic detection of .zst/.xz/.gz extensions
 - **Compression Creation**: Tests creating compressed images with all three algorithms
 - **Resize Compressed**: Tests resizing .zst, .xz, and .gz images with automatic decompression
-- **Cleanup Tests**: Verifies temporary decompressed files are properly cleaned up
 
-All 32 compression tests validate:
+All tests validate:
 - Compressed images are created successfully with significant size reduction
 - Original compressed files remain unchanged during resize operations
 - Temporary decompressed files are automatically cleaned up
 - Resized images have valid partition tables and filesystems
-- Tool availability and compression level validation work correctly
+- File contents are preserved across all resize operations
+
+### Run All Tests
+
+```bash
+bun run test:all
+```

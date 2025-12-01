@@ -1,2 +1,7 @@
 TEMP
 *.img
+dist/
+snapshot-*.txt
+test-*.img*
+*.decompressed_*.img
+*.bun-build
