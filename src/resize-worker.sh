@@ -93,6 +93,7 @@ fi
 
 # Set defaults
 BOOT_SIZE_MB="${BOOT_SIZE_MB:-256}"
+IMAGE_SIZE="${IMAGE_SIZE:-}"
 UNSAFE_RESIZE_EXT4="${UNSAFE_RESIZE_EXT4:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 VERBOSE="${VERBOSE:-0}"
@@ -100,8 +101,146 @@ VERBOSE="${VERBOSE:-0}"
 log_info "=== Raspberry Pi Image Resizer Worker ==="
 log_info "Image file: $IMAGE_FILE"
 log_info "Target boot size: ${BOOT_SIZE_MB}MB"
+[[ -n "$IMAGE_SIZE" ]] && log_info "Target image size: $IMAGE_SIZE"
 [[ "$UNSAFE_RESIZE_EXT4" == "1" ]] && log_warn "Unsafe ext4 resizing enabled"
 [[ "$DRY_RUN" == "1" ]] && log_warn "DRY RUN mode active"
+
+# Step 0: Resize image file if requested (before any other operations)
+if [[ -n "$IMAGE_SIZE" ]]; then
+    log_info "Step 0: Adjusting image file size..."
+    
+    # Parse target size and convert to bytes
+    TARGET_SIZE_BYTES=0
+    if [[ "$IMAGE_SIZE" =~ ^([0-9]+)([MGT]B?)$ ]]; then
+        SIZE_NUM="${BASH_REMATCH[1]}"
+        SIZE_UNIT="${BASH_REMATCH[2]}"
+        
+        case "${SIZE_UNIT^^}" in
+            M|MB)
+                TARGET_SIZE_BYTES=$((SIZE_NUM * 1024 * 1024))
+                ;;
+            G|GB)
+                TARGET_SIZE_BYTES=$((SIZE_NUM * 1024 * 1024 * 1024))
+                ;;
+            T|TB)
+                TARGET_SIZE_BYTES=$((SIZE_NUM * 1024 * 1024 * 1024 * 1024))
+                ;;
+            *)
+                log_error "Invalid size unit: $SIZE_UNIT (use MB, GB, or TB)"
+                exit 1
+                ;;
+        esac
+    else
+        log_error "Invalid size format: $IMAGE_SIZE (use format: 32GB, 64GB, etc.)"
+        exit 1
+    fi
+    
+    # Validate target size is reasonable
+    if [[ $TARGET_SIZE_BYTES -lt $((100 * 1024 * 1024)) ]]; then
+        log_error "Target size too small (minimum 100MB)"
+        exit 1
+    fi
+    
+    if [[ $TARGET_SIZE_BYTES -gt $((10 * 1024 * 1024 * 1024 * 1024)) ]]; then
+        log_error "Target size too large (maximum 10TB)"
+        exit 1
+    fi
+    
+    # Get current image size
+    CURRENT_SIZE_BYTES=$(stat -c%s "/work/$IMAGE_FILE" 2>/dev/null || stat -f%z "/work/$IMAGE_FILE" 2>/dev/null)
+    CURRENT_SIZE_MB=$((CURRENT_SIZE_BYTES / 1024 / 1024))
+    TARGET_SIZE_MB=$((TARGET_SIZE_BYTES / 1024 / 1024))
+    
+    log_info "Current image size: ${CURRENT_SIZE_MB}MB"
+    log_info "Target image size: ${TARGET_SIZE_MB}MB"
+    
+    if [[ $TARGET_SIZE_BYTES -eq $CURRENT_SIZE_BYTES ]]; then
+        log_info "Image already at target size"
+    elif [[ $TARGET_SIZE_BYTES -gt $CURRENT_SIZE_BYTES ]]; then
+        # Expanding image
+        EXPANSION_MB=$((TARGET_SIZE_MB - CURRENT_SIZE_MB))
+        log_info "Expanding image by ${EXPANSION_MB}MB..."
+        
+        if [[ "$DRY_RUN" != "1" ]]; then
+            # Check available disk space
+            AVAILABLE_KB=$(df -k /work | tail -1 | awk '{print $4}')
+            REQUIRED_KB=$((EXPANSION_MB * 1024))
+            
+            if [[ $AVAILABLE_KB -lt $REQUIRED_KB ]]; then
+                log_error "Insufficient disk space. Need ${REQUIRED_KB}KB, have ${AVAILABLE_KB}KB"
+                exit 1
+            fi
+            
+            truncate -s "$TARGET_SIZE_BYTES" "/work/$IMAGE_FILE" || {
+                log_error "Failed to expand image file"
+                exit 1
+            }
+            
+            log_info "Image expanded successfully"
+        else
+            log_debug "Dry run - image expansion skipped"
+        fi
+        
+        IMAGE_WAS_EXPANDED=true
+    else
+        # Shrinking image - need to validate partitions first
+        log_warn "Shrinking image - validating partition boundaries..."
+        
+        if [[ "$DRY_RUN" != "1" ]]; then
+            # Temporarily attach to check partition table
+            TEMP_LOOP=$(losetup -f --show "/work/$IMAGE_FILE")
+            
+            # Get partition table and find last partition end
+            LAST_SECTOR=0
+            while read line; do
+                if [[ "$line" =~ start=[[:space:]]*([0-9]+).*size=[[:space:]]*([0-9]+) ]]; then
+                    START="${BASH_REMATCH[1]}"
+                    SIZE="${BASH_REMATCH[2]}"
+                    END=$((START + SIZE - 1))
+                    if [[ $END -gt $LAST_SECTOR ]]; then
+                        LAST_SECTOR=$END
+                    fi
+                fi
+            done < <(sfdisk -d "$TEMP_LOOP" 2>/dev/null)
+            
+            losetup -d "$TEMP_LOOP"
+            
+            # Add 10MB safety margin (20480 sectors)
+            MIN_REQUIRED_SECTORS=$((LAST_SECTOR + 20480))
+            MIN_REQUIRED_BYTES=$((MIN_REQUIRED_SECTORS * 512))
+            MIN_REQUIRED_MB=$((MIN_REQUIRED_BYTES / 1024 / 1024))
+            
+            log_debug "Last partition ends at sector $LAST_SECTOR"
+            log_debug "Minimum required size: ${MIN_REQUIRED_MB}MB (with 10MB safety margin)"
+            
+            if [[ $TARGET_SIZE_BYTES -lt $MIN_REQUIRED_BYTES ]]; then
+                SHORTAGE_MB=$((MIN_REQUIRED_MB - TARGET_SIZE_MB))
+                log_error "Cannot shrink image below partition boundaries"
+                log_error "Minimum required: ${MIN_REQUIRED_MB}MB"
+                log_error "Requested target: ${TARGET_SIZE_MB}MB"
+                log_error "Shortage: ${SHORTAGE_MB}MB"
+                exit 1
+            fi
+            
+            SHRINK_MB=$((CURRENT_SIZE_MB - TARGET_SIZE_MB))
+            log_info "Shrinking image by ${SHRINK_MB}MB..."
+            
+            truncate -s "$TARGET_SIZE_BYTES" "/work/$IMAGE_FILE" || {
+                log_error "Failed to shrink image file"
+                exit 1
+            }
+            
+            log_info "Image shrunk successfully"
+        else
+            log_debug "Dry run - image shrinking skipped"
+        fi
+        
+        IMAGE_WAS_SHRUNK=true
+    fi
+else
+    IMAGE_WAS_EXPANDED=false
+    IMAGE_WAS_SHRUNK=false
+fi
 
 # Step 1: Attach image as loop device
 log_info "Step 1: Attaching image as loop device..."
@@ -641,8 +780,152 @@ else
     log_debug "Dry run - file restoration skipped"
 fi
 
-# Step 9: Optional ext4 resize (if enabled and not already done)
-if [[ "$UNSAFE_RESIZE_EXT4" == "1" ]] && [[ "$NEEDS_ROOT_MOVE" != "true" ]]; then
+# Step 9: Automatic root partition adjustment when image size changed
+if [[ "$IMAGE_WAS_EXPANDED" == "true" ]] || [[ "$IMAGE_WAS_SHRUNK" == "true" ]]; then
+    log_info "Step 9: Adjusting root partition to use available space..."
+    
+    if [[ "$DRY_RUN" != "1" ]]; then
+        # Get current disk and partition info
+        DISK_SIZE_SECTORS=$(blockdev --getsz "$LOOP_DEVICE")
+        
+        # Parse current root partition boundaries
+        pt_dump=$(sfdisk -d "$LOOP_DEVICE" 2>/dev/null || true)
+        p2_line=$(echo "$pt_dump" | grep -E '^/dev/.+p2[[:space:]]:')
+        CURRENT_ROOT_START=$(echo "$p2_line" | sed -n 's/.*start=\s*\([0-9]\+\),.*/\1/p')
+        CURRENT_ROOT_SIZE=$(echo "$p2_line" | sed -n 's/.*size=\s*\([0-9]\+\),.*/\1/p')
+        
+        if [[ -z "$CURRENT_ROOT_START" || -z "$CURRENT_ROOT_SIZE" ]]; then
+            log_error "Failed to parse current root partition boundaries"
+            exit 1
+        fi
+        
+        # Calculate maximum available space for root (disk end minus root start, with 2048 sector alignment buffer)
+        MAX_ROOT_SIZE_SECTORS=$((DISK_SIZE_SECTORS - CURRENT_ROOT_START - 2048))
+        MAX_ROOT_SIZE_MB=$((MAX_ROOT_SIZE_SECTORS * 512 / 1024 / 1024))
+        CURRENT_ROOT_SIZE_MB=$((CURRENT_ROOT_SIZE * 512 / 1024 / 1024))
+        
+        log_debug "Current root: ${CURRENT_ROOT_SIZE_MB}MB (sectors ${CURRENT_ROOT_START}-$((CURRENT_ROOT_START + CURRENT_ROOT_SIZE - 1)))"
+        log_debug "Maximum available: ${MAX_ROOT_SIZE_MB}MB"
+        
+        if [[ "$IMAGE_WAS_EXPANDED" == "true" ]] && [[ $MAX_ROOT_SIZE_SECTORS -gt $CURRENT_ROOT_SIZE ]]; then
+            # Expand root partition to use all available space
+            EXPANSION_MB=$((MAX_ROOT_SIZE_MB - CURRENT_ROOT_SIZE_MB))
+            log_info "Expanding root partition by ${EXPANSION_MB}MB to ${MAX_ROOT_SIZE_MB}MB..."
+            
+            # Update partition table
+            p1_line=$(echo "$pt_dump" | grep -E '^/dev/.+p1[[:space:]]:')
+            BOOT_START=$(echo "$p1_line" | sed -n 's/.*start=\s*\([0-9]\+\),.*/\1/p')
+            BOOT_SIZE=$(echo "$p1_line" | sed -n 's/.*size=\s*\([0-9]\+\),.*/\1/p')
+            
+            cat > /tmp/expand-root.sfdisk <<EOF
+label: dos
+unit: sectors
+
+${LOOP_DEVICE}p1 : start=${BOOT_START}, size=${BOOT_SIZE}, type=c, bootable
+${LOOP_DEVICE}p2 : start=${CURRENT_ROOT_START}, size=${MAX_ROOT_SIZE_SECTORS}, type=83
+EOF
+            
+            if ! sfdisk --force --no-reread "$LOOP_DEVICE" < /tmp/expand-root.sfdisk 2>/tmp/sfdisk-expand.log; then
+                log_error "Failed to expand root partition table"
+                cat /tmp/sfdisk-expand.log
+                exit 1
+            fi
+            
+            partprobe "$LOOP_DEVICE" 2>/dev/null || true
+            blockdev --rereadpt "$LOOP_DEVICE" 2>/dev/null || true
+            kpartx -dv "$LOOP_DEVICE" 2>/dev/null || true
+            kpartx -av "$LOOP_DEVICE" 2>/dev/null || true
+            sleep 2
+            
+            # Update ROOT_PART reference
+            if [[ -e "/dev/mapper/$(basename ${LOOP_DEVICE})p2" ]]; then
+                ROOT_PART="/dev/mapper/$(basename ${LOOP_DEVICE})p2"
+            else
+                ROOT_PART="${LOOP_DEVICE}p2"
+            fi
+            
+            # Expand filesystem
+            log_info "Expanding root filesystem to fill partition..."
+            e2fsck -f -y "$ROOT_PART" || {
+                log_error "Filesystem check failed before expansion"
+                exit 1
+            }
+            
+            resize2fs "$ROOT_PART" || {
+                log_error "Filesystem expansion failed"
+                exit 1
+            }
+            
+            log_info "Root partition expanded successfully to ${MAX_ROOT_SIZE_MB}MB"
+            
+        elif [[ "$IMAGE_WAS_SHRUNK" == "true" ]] && [[ $MAX_ROOT_SIZE_SECTORS -lt $CURRENT_ROOT_SIZE ]]; then
+            # Shrink root partition to fit in available space
+            SHRINK_MB=$((CURRENT_ROOT_SIZE_MB - MAX_ROOT_SIZE_MB))
+            log_info "Shrinking root partition by ${SHRINK_MB}MB to ${MAX_ROOT_SIZE_MB}MB..."
+            
+            # Check filesystem usage
+            mkdir -p /mnt/root
+            mount "$ROOT_PART" /mnt/root
+            ROOT_USED_KB=$(df -k /mnt/root | tail -1 | awk '{print $3}')
+            ROOT_USED_MB=$((ROOT_USED_KB / 1024))
+            umount /mnt/root
+            
+            MIN_REQUIRED_MB=$((ROOT_USED_MB * 120 / 100 + 100))
+            
+            if [[ $MAX_ROOT_SIZE_MB -lt $MIN_REQUIRED_MB ]]; then
+                log_error "Cannot shrink root partition: insufficient space"
+                log_error "Filesystem uses ${ROOT_USED_MB}MB, minimum ${MIN_REQUIRED_MB}MB required"
+                log_error "Target size ${MAX_ROOT_SIZE_MB}MB is too small"
+                exit 1
+            fi
+            
+            # Shrink filesystem first
+            log_info "Shrinking filesystem to ${MAX_ROOT_SIZE_MB}MB..."
+            e2fsck -f -y "$ROOT_PART" || {
+                log_error "Filesystem check failed before shrinking"
+                exit 1
+            }
+            
+            resize2fs "$ROOT_PART" "${MAX_ROOT_SIZE_MB}M" || {
+                log_error "Filesystem shrink failed"
+                exit 1
+            }
+            
+            # Update partition table
+            p1_line=$(echo "$pt_dump" | grep -E '^/dev/.+p1[[:space:]]:')
+            BOOT_START=$(echo "$p1_line" | sed -n 's/.*start=\s*\([0-9]\+\),.*/\1/p')
+            BOOT_SIZE=$(echo "$p1_line" | sed -n 's/.*size=\s*\([0-9]\+\),.*/\1/p')
+            
+            cat > /tmp/shrink-root.sfdisk <<EOF
+label: dos
+unit: sectors
+
+${LOOP_DEVICE}p1 : start=${BOOT_START}, size=${BOOT_SIZE}, type=c, bootable
+${LOOP_DEVICE}p2 : start=${CURRENT_ROOT_START}, size=${MAX_ROOT_SIZE_SECTORS}, type=83
+EOF
+            
+            if ! sfdisk --force --no-reread "$LOOP_DEVICE" < /tmp/shrink-root.sfdisk 2>/tmp/sfdisk-shrink.log; then
+                log_error "Failed to shrink root partition table"
+                cat /tmp/sfdisk-shrink.log
+                exit 1
+            fi
+            
+            partprobe "$LOOP_DEVICE" 2>/dev/null || true
+            blockdev --rereadpt "$LOOP_DEVICE" 2>/dev/null || true
+            kpartx -dv "$LOOP_DEVICE" 2>/dev/null || true
+            kpartx -av "$LOOP_DEVICE" 2>/dev/null || true
+            sleep 2
+            
+            log_info "Root partition shrunk successfully to ${MAX_ROOT_SIZE_MB}MB"
+            
+        else
+            log_info "Root partition already optimal for current disk size"
+        fi
+    else
+        log_debug "Dry run - root partition adjustment skipped"
+    fi
+    
+elif [[ "$UNSAFE_RESIZE_EXT4" == "1" ]] && [[ "$NEEDS_ROOT_MOVE" != "true" ]]; then
     log_warn "Step 9: Resizing ext4 root partition (UNSAFE MODE)..."
     
     if [[ "$DRY_RUN" != "1" ]]; then

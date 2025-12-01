@@ -53,16 +53,97 @@ The Docker‑based solution shall:
 The system must accept:
 
 ```
-resize-image.sh <path-to-image> [--boot-size <MB>] [--unsafe-resize-ext4]
+resize-image.sh <path-to-image> [--boot-size <MB>] [--image-size <size>] [--unsafe-resize-ext4]
 ```
 
 - `<path-to-image>` — required; must be a `.img` or raw image.
 - `--boot-size <MB>` — optional; default: **256 MB**.
+- `--image-size <size>` — optional; resize overall image file and automatically adjust root partition.
+  - Accepts units: `MB`, `GB`, `TB` (e.g., `32GB`, `64GB`, `128GB`)
+  - **Expanding**: Always allowed; appends zeros to grow the image file
+  - **Shrinking**: Only allowed if there is sufficient free space after the last partition
+  - Must be processed **before** any partition manipulation operations
+  - **Triggers automatic root partition adjustment**: After boot resize completes, root partition automatically expands or shrinks to use all remaining space
+  - Example use cases:
+    - Resize a 32GB SD card image to 64GB, then expand root to fill the extra space
+    - Shrink a 64GB image to 32GB, automatically shrinking root partition to fit
 - `--unsafe-resize-ext4` — optional; allows modifying ext4 root partition (disabled by default).
 
 ---
 
+### **FR-1b: Image Size Adjustment (Pre-Processing)**
+If `--image-size` is specified, the system must resize the image file **before** any other operations:
+
+**Expanding the image:**
+1. Parse the target size and convert to bytes (supporting MB, GB, TB units)
+2. Get current image file size
+3. If target size > current size:
+   - Expand image file using `truncate` or `dd`:
+     ```bash
+     truncate -s <target-size> image.img
+     # OR
+     dd if=/dev/zero bs=1M count=<additional-MB> >> image.img
+     ```
+4. Verify new file size matches target
+5. Proceed with partition operations on expanded image
+
+**Shrinking the image:**
+1. Parse target size and convert to bytes
+2. Attach image as loop device and analyze partition table
+3. Calculate the end sector of the last partition (plus safety margin of 10MB)
+4. Calculate minimum required image size in bytes
+5. If target size < minimum required:
+   - **Abort** with clear error message showing:
+     - Current image size
+     - Minimum required size (based on partitions)
+     - Requested target size
+     - Amount of additional space needed
+6. If target size ≥ minimum required:
+   - Detach loop device
+   - Truncate image file to target size:
+     ```bash
+     truncate -s <target-size> image.img
+     ```
+7. Verify new file size
+8. Proceed with partition operations on shrunk image
+
+**Safety requirements:**
+- Image size adjustment must occur **before backup creation** to avoid creating oversized backups
+- Must validate target size is reasonable (e.g., not less than 100MB, not more than 10TB)
+- Must check available disk space on host before expanding
+- Shrinking validation must account for:
+  - Root filesystem usage (prevent data loss)
+  - All partition end boundaries
+  - Safety margin (minimum 10MB after last partition)
+  - Potential partition alignment requirements
+- Provide clear progress indication for large resize operations
+- On shrink failure, image file must remain at original size
+
+**Automatic root partition adjustment workflow (implemented and tested):**
+When `--image-size` is specified, the operation sequence is:
+1. Resize image file (expand or shrink)
+2. Create backup
+3. Attach loop device
+4. Resize boot partition to requested size
+5. **Automatically adjust root partition** to use remaining space:
+   - If image was expanded: grow root partition and filesystem to fill available space
+   - If image was shrunk: verify root filesystem fits, then shrink root partition to available space
+6. Verify all operations and detach loop device
+
+Test coverage:
+- No image change; boot grows to 256MB → root is automatically shrunk and moved if needed (files preserved)
+- Image expands (700MB→1500MB); boot grows to 256MB → root is automatically expanded to consume remaining space (files preserved)
+- Image shrinks (700MB→600MB) while boot remains 64MB → image shrink validated and applied; root remains within bounds; files preserved
+
+---
+
 ### **FR-2: Backup Handling**
+Before any modification (after optional image size adjustment):
+
+- A timestamped backup must be created in the same directory.
+- Format: `<name>_<YYYYMMDDHHMM>.img`
+- All processing uses the backup.
+- Original image must remain unmodified.
 Before any modification:
 
 - A timestamped backup must be created in the same directory.
@@ -179,6 +260,33 @@ After modifying partition 1:
 
 ### **FR-8: Root Partition Resize**
 
+**Automatic Root Partition Adjustment with `--image-size`:**
+When `--image-size` is specified, after boot partition resize completes:
+
+1. **Calculate available space**:
+   - Determine end of boot partition (after resize to requested size)
+   - Calculate remaining space: (total disk sectors) - (boot end sector) - (alignment buffer)
+   
+2. **Expand root partition** if image was grown:
+   - Update partition table to use all available space after boot partition
+   - Expand ext4 filesystem to fill the enlarged partition:
+     ```bash
+     e2fsck -f /dev/loop0p2
+     resize2fs /dev/loop0p2
+     ```
+   - Automatically enabled when `--image-size` results in more space than current root partition
+   
+3. **Shrink root partition** if image was shrunk:
+   - Check current filesystem usage
+   - Verify target size accommodates: (used space × 1.2) + 100MB buffer
+   - Shrink filesystem first, then update partition table:
+     ```bash
+     e2fsck -f /dev/loop0p2
+     resize2fs /dev/loop0p2 <new-size>M
+     sfdisk --force --no-reread /dev/loop0 < new-layout.sfdisk
+     ```
+   - Only allowed if sufficient free space exists in filesystem
+
 **Automatic Shrinking (enabled by default when needed):**
 When boot partition expansion requires moving the root partition:
 
@@ -213,6 +321,7 @@ The Linux container provides full capabilities for:
 - Modifying partition table without data loss (when sufficient space exists)
 - Running comprehensive filesystem integrity checks before and after operations
 - Intelligent automatic optimization based on actual filesystem usage
+- Automatic root partition expansion/shrinking when image size is adjusted
 
 ---
 
@@ -271,43 +380,59 @@ The write command must:
 3. Display a numbered list of all compatible devices (no Pi-specific filtering)
 4. Allow interactive selection of the target device
 5. Require double confirmation before writing ("yes" and final "WRITE")
-6. Unmount any volumes on the target device before writing
-7. Write the image to the raw device using `dd` with progress
-8. Sync and report success/failure
+## 6. Risks & Limitations
 
-Safety requirements:
-- **Clone command**: Detects Raspberry Pi SD cards specifically to avoid accidental selection of wrong devices
-- **Write command**: More permissive device scanning (removable/≤2TB only) but requires double confirmation
-- Require explicit user confirmation before starting `dd` operation
-- Validate that the selected device meets the operation's criteria (removable media)
-- Request confirmation if the output filepath exists (clone only)
-- Check for sufficient disk space before cloning (clone only)
-- Provide clear warnings about the time required and destructive nature
-- Show progress during `dd` operations (press Ctrl+T on macOS)
-- For write, require explicit double confirmation due to highly destructive action
-- For clone, remount all mountable volumes when done to restore user environment
-
----
-
-## 5. Non-Functional Requirements
-
-### **NFR-1: Safety**
-- Original image must never be modified.
-- Ext4 resizing must be opt‑in.
-- The tool must abort on:
-  - overlapping partitions,
-  - corrupted MBR/GPT,
+- Docker on macOS cannot access raw block devices (e.g., `/dev/disk2`) — only `.img` files.
+  - **Workaround**: Use `clone-sd.sh` to first clone SD card to `.img` file, then manipulate the image.
+- FAT resizing is destructive; partition files must be backed up and restored.
+- Some images may have unusual partition layouts (NOOBS, multi-boot).
+- **Image size adjustment**:
+  - Expanding image files is fast but requires sufficient host disk space (can be several GB).
+  - Shrinking below minimum required size (end of last partition + 10MB) will fail with clear error.
+  - Very large expansions (e.g., 32GB → 500GB) may take time depending on filesystem write speed.
+  - Shrinking does not reclaim space from partition gaps or empty regions within partitions—only truncates after the last partition boundary.
+  - Image size changes are persistent and affect the backup file size.
+- **Partition movement operations**:
+  - Moving partitions requires sufficient free space on the disk image.
+  - **Automatic optimization**: The tool detects when shrinking root before moving eliminates the need for image expansion.
+  - **`--image-size` integration**: Expanding image size before operations provides the space needed for partition moves.
+  - Uses deterministic `sfdisk` table scripts to rewrite partition entries.
+  - Uses overlap‑safe `dd` backward copy to relocate data when ranges overlap; forward `dd` copy otherwise.
+  - Moving ext4 partitions is safe but time‑consuming for large filesystems (can take 10+ minutes for 10GB+).
+  - Most boot expansion operations complete without requiring manual disk image expansion.
+- **Filesystem resizing constraints**:
+✔ `--image-size` parameter correctly expands image files with MB/GB/TB units  
+✔ Image expansion occurs before backup creation to avoid oversized backups  
+✔ Shrinking validation prevents truncating active partition data  
+✔ Clear error messages when shrinking below minimum required size  
+✔ Expanded images provide sufficient space for subsequent partition operations  
+✔ Root partition automatically expands to fill space when image is grown with `--image-size`  
+✔ Root partition automatically shrinks safely when image is reduced with `--image-size`  
+✔ Root filesystem expansion/shrinking occurs after boot partition resize completes
+✔ Root partition remains intact unless explicitly modified  
+✔ The output image boots successfully on a Raspberry Pi  
+✔ Docker logs show all commands executed inside the container  
+✔ Running `clone-sd.sh` detects Raspberry Pi SD cards and clones them to image files  
+✔ SD card detection correctly identifies devices with `cmdline.txt`  
+✔ User can select device by index number  
+✔ Cloned image is bootable and identical to source SD card  
+✔ `--image-size` parameter correctly expands image files with MB/GB/TB units  
+✔ Image expansion occurs before backup creation to avoid oversized backups  
+✔ Shrinking validation prevents truncating active partition data  
+✔ Clear error messages when shrinking below minimum required size  
+✔ Expanded images provide sufficient space for subsequent partition operations
   - missing loop device support.
 
 ### **NFR-2: Portability**
 Must work on:
+## 8. Future Enhancements
 
-- macOS 13 (Ventura)
-- macOS 14 (Sonoma)
-- macOS 15 (Sequoia)
-- Intel and Apple Silicon architectures
-
-### **NFR-3: Reproducibility**
+- GUI frontend (Electron or Swift)
+- Support for GPT‑based Raspberry Pi OS variants
+- Verification mode: run `fsck` after each operation
+- Automatic image shrink: analyze partitions and shrink image to minimum size plus configurable margin
+- Smart shrink: combine root partition shrinking with image size reduction in a single operation
+- **Advanced partition operations**:
 - Docker image versions must be pinned (e.g., Ubuntu 24.04).
 - All commands executed inside container must be logged (verbose mode).
 
@@ -359,6 +484,9 @@ Tool must:
 ✔ SD card detection correctly identifies devices with `cmdline.txt`  
 ✔ User can select device by index number  
 ✔ Cloned image is bootable and identical to source SD card
+✔ With `--image-size`, root auto-expands or auto-shrinks after boot resize, preserving files  
+✔ Shrink operation validates last-partition boundary + 10MB margin; aborts with clear errors when unsafe  
+✔ End-to-end tests cover: root shrink+move (no image change), image expand+root expand, image shrink (root within bounds)
 
 ---
 

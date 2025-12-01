@@ -39,6 +39,8 @@ Arguments:
 
 Options:
   --boot-size <MB>         Size for boot partition in MB (default: 256)
+  --image-size <size>      Resize overall image file (e.g., 32GB, 64GB, 128GB)
+                           Automatically adjusts root partition after boot resize
   --unsafe-resize-ext4     Enable ext4 root partition resizing (dangerous!)
   --dry-run               Preview changes without modifying the image
   --verbose               Show detailed output from Docker container
@@ -47,7 +49,8 @@ Options:
 Examples:
   $0 raspios.img
   $0 raspios.img --boot-size 512
-  $0 raspios.img --boot-size 512 --unsafe-resize-ext4
+  $0 raspios.img --image-size 64GB
+  $0 raspios.img --boot-size 512 --image-size 64GB
 
 EOF
     exit 0
@@ -56,6 +59,7 @@ EOF
 # Parse arguments
 IMAGE_PATH=""
 BOOT_SIZE=256
+IMAGE_SIZE=""
 UNSAFE_RESIZE_EXT4=0
 DRY_RUN=0
 VERBOSE=0
@@ -67,6 +71,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --boot-size)
             BOOT_SIZE="$2"
+            shift 2
+            ;;
+        --image-size)
+            IMAGE_SIZE="$2"
             shift 2
             ;;
         --unsafe-resize-ext4)
@@ -124,6 +132,7 @@ resize_raspberry_pi_image() {
     log_info "=========================="
     log_info "Image: $image_path"
     log_info "Boot partition size: ${boot_size}MB"
+    [[ -n "$IMAGE_SIZE" ]] && log_info "Target image size: $IMAGE_SIZE"
     [[ $UNSAFE_RESIZE_EXT4 -eq 1 ]] && log_warn "Unsafe ext4 resizing ENABLED"
     [[ $DRY_RUN -eq 1 ]] && log_warn "DRY RUN mode - no modifications will be made"
 
@@ -176,6 +185,7 @@ resize_raspberry_pi_image() {
     # Add environment variables
     docker_cmd="$docker_cmd -e IMAGE_FILE=\"$work_image\""
     docker_cmd="$docker_cmd -e BOOT_SIZE_MB=\"$boot_size\""
+    [[ -n "$IMAGE_SIZE" ]] && docker_cmd="$docker_cmd -e IMAGE_SIZE=\"$IMAGE_SIZE\""
     docker_cmd="$docker_cmd -e UNSAFE_RESIZE_EXT4=\"$UNSAFE_RESIZE_EXT4\""
     docker_cmd="$docker_cmd -e DRY_RUN=\"$DRY_RUN\""
     docker_cmd="$docker_cmd -e VERBOSE=\"$VERBOSE\""

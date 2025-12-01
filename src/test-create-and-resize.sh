@@ -4,11 +4,13 @@ set -euo pipefail
 # Test script: create a small Pi-like image entirely INSIDE container, then run resize-worker.sh
 # Assumptions: running in the built Docker image with required tools, privileged mode.
 
-IMAGE_FILE="test.img"
-EXPORT_BOOT_TARGET_MB="256"   # Target boot size for resize
-INITIAL_BOOT_MB="64"          # Initial boot size to provoke move
-TOTAL_MB="700"                # Total image size
-VERBOSE="1"
+IMAGE_FILE=${IMAGE_FILE:-"test.img"}
+EXPORT_BOOT_TARGET_MB=${BOOT_SIZE_MB:-"256"}   # Target boot size for resize
+INITIAL_BOOT_MB="64"                            # Initial boot size to provoke move
+INITIAL_IMAGE_MB=${INITIAL_IMAGE_MB:-"700"}    # Initial image size
+FREE_TAIL_MB=${FREE_TAIL_MB:-"0"}            # Optional free space at end of disk to allow shrink
+TARGET_IMAGE_MB=${TARGET_IMAGE_MB:-""}         # Target image size (if expanding/shrinking)
+VERBOSE=${VERBOSE:-"1"}
 SNAPSHOT=${SNAPSHOT:-0}
 
 log() { echo "[TEST] $*"; }
@@ -20,23 +22,28 @@ if [[ -f "$IMAGE_FILE" ]]; then
   rm -f "$IMAGE_FILE"
 fi
 
-log "Creating blank image ${TOTAL_MB}MB..."
-dd if=/dev/zero of="$IMAGE_FILE" bs=1M count="$TOTAL_MB" status=none
+log "Creating blank image ${INITIAL_IMAGE_MB}MB..."
+dd if=/dev/zero of="$IMAGE_FILE" bs=1M count="$INITIAL_IMAGE_MB" status=none
 
 # Attach loop (initial, no partition scan yet)
 LOOP=$(losetup -f --show "$IMAGE_FILE")
 log "Loop device (initial): $LOOP"
 
 # Calculate sectors
-SECTORS_TOTAL=$((TOTAL_MB * 1024 * 1024 / 512))
+SECTORS_TOTAL=$((INITIAL_IMAGE_MB * 1024 * 1024 / 512))
 BOOT_SIZE_SECTORS=$((INITIAL_BOOT_MB * 1024 * 1024 / 512))
+FREE_TAIL_SECTORS=$((FREE_TAIL_MB * 1024 * 1024 / 512))
 BOOT_START=8192
 BOOT_END=$((BOOT_START + BOOT_SIZE_SECTORS - 1))
 ROOT_START=$((BOOT_END + 1))
-ROOT_END=$((SECTORS_TOTAL - 1))
+ROOT_END=$((SECTORS_TOTAL - 1 - FREE_TAIL_SECTORS))
 ROOT_SIZE_SECTORS=$((ROOT_END - ROOT_START + 1))
 
-log "Writing initial partition table (boot ${INITIAL_BOOT_MB}MB, root rest)..."
+if [[ "$FREE_TAIL_MB" != "0" ]]; then
+  log "Writing initial partition table (boot ${INITIAL_BOOT_MB}MB, root rest, free tail ${FREE_TAIL_MB}MB)..."
+else
+  log "Writing initial partition table (boot ${INITIAL_BOOT_MB}MB, root rest)..."
+fi
 cat > /tmp/layout.sfdisk <<EOF
 label: dos
 unit: sectors
@@ -108,10 +115,20 @@ sync
 log "Listing test image before resize:"; ls -l /work/"$IMAGE_FILE" || { log "Missing test image"; exit 1; }
 log "Keeping loop attached to avoid race conditions"
 sync; sleep 1
-log "Running resize-worker.sh to expand boot to ${EXPORT_BOOT_TARGET_MB}MB (will move root)..."
+
+# Setup environment variables for resize-worker
 export IMAGE_FILE="$IMAGE_FILE"
 export BOOT_SIZE_MB="$EXPORT_BOOT_TARGET_MB"
 export VERBOSE="$VERBOSE"
+
+# If TARGET_IMAGE_MB is set, pass IMAGE_SIZE parameter
+if [[ -n "$TARGET_IMAGE_MB" ]]; then
+  export IMAGE_SIZE="${TARGET_IMAGE_MB}MB"
+  log "Running resize-worker.sh: image ${INITIAL_IMAGE_MB}MB→${TARGET_IMAGE_MB}MB, boot ${INITIAL_BOOT_MB}MB→${EXPORT_BOOT_TARGET_MB}MB"
+else
+  log "Running resize-worker.sh: boot ${INITIAL_BOOT_MB}MB→${EXPORT_BOOT_TARGET_MB}MB (no image resize)"
+fi
+
 /usr/local/bin/resize-worker.sh || { log "Resize script failed"; exit 1; }
 
 log "Re-attaching image for post-resize snapshot..."

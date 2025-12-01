@@ -11,6 +11,7 @@ A **cross-platform, safe, reproducible** solution for resizing and modifying Ras
 - ✅ **Reproducible**: Uses pinned Docker images for consistent results
 - ✅ **Boot partition resizing**: Adjust FAT32 boot partition size
 - ✅ **Automatic optimization**: Intelligently shrinks root partition when needed to avoid disk expansion
+- ✅ **Overall image resizing**: `--image-size` grows or shrinks the entire image file (MB/GB/TB)
 - ✅ **Partition moving**: Automatically moves partitions to make room for boot expansion
 - ✅ **File preservation**: Backs up and restores all boot files
 - ✅ **Optional ext4 resize**: Opt-in support for manual root partition resizing
@@ -135,6 +136,7 @@ The `clone-sd.sh` script handles cloning and writing.
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--boot-size <MB>` | Size for boot partition in MB | 256 |
+| `--image-size <size>` | Resize whole image (supports `MB`, `GB`, `TB`) | - |
 | `--unsafe-resize-ext4` | Enable ext4 root partition resizing | Disabled |
 | `--dry-run` | Preview changes without modifying | Disabled |
 | `--verbose` | Show detailed output from Docker | Disabled |
@@ -152,9 +154,14 @@ The `clone-sd.sh` script handles cloning and writing.
 ./resize-image.sh raspios.img --dry-run
 ```
 
-**Resize both boot and root partitions (dangerous!):**
+**Expand image and auto-grow root:**
 ```bash
-./resize-image.sh raspios.img --boot-size 512 --unsafe-resize-ext4
+./resize-image.sh raspios.img --image-size 64GB --boot-size 256
+```
+
+**Shrink image (only if safe):**
+```bash
+./resize-image.sh raspios.img --image-size 600MB --boot-size 64
 ```
 
 **Verbose output for debugging:**
@@ -175,7 +182,8 @@ The `clone-sd.sh` script handles cloning and writing.
 9. **Partition Resize**: Adjusts boot partition boundaries using `sfdisk` scripts
 10. **Filesystem Creation**: Creates new FAT32 filesystem with `mkfs.vfat`
 11. **File Restoration**: Restores backed-up boot files
-12. **Cleanup**: Unmounts filesystems and detaches loop devices
+12. **Root Auto-Adjust** (when `--image-size` used): expands or shrinks root to fit the new image size
+13. **Cleanup**: Unmounts filesystems and detaches loop devices
 
 ## Safety Features
 
@@ -308,11 +316,10 @@ dd: /dev/rdisk2: Permission denied
 - Some unusual partition layouts (NOOBS, multi-boot) may not be supported
 - Boot partition must be FAT32 (vfat)
 - Root partition must be ext4 for automatic shrinking and move operations
-- Cannot shrink root partition if filesystem usage exceeds 80% of current size
+- Shrinking validates last partition end + 10MB safety margin; aborts if unsafe
 - Partition moving operations are time-consuming for large filesystems:
-  - 10GB partition: ~5-10 minutes
-  - 30GB partition: ~15-30 minutes
-  - Uses `parted move` for efficient data relocation
+  - 10GB partition: minutes to tens of minutes depending on I/O
+  - Uses overlap-safe `dd` backward copy when ranges overlap
 
 ## Advanced Usage
 
@@ -363,6 +370,10 @@ Clone an SD card and then resize it:
 # Step 2: Resize the boot partition in the cloned image
 ./resize-image.sh original-raspios.img --boot-size 512
 
+# Optional: Expand or shrink the overall image and auto-adjust root
+./resize-image.sh original-raspios.img --image-size 64GB --boot-size 256
+./resize-image.sh original-raspios.img --image-size 600MB --boot-size 64
+
 # The resized image will be saved as original-raspios_202511261430.img
 # Original clone remains unchanged
 ```
@@ -381,7 +392,7 @@ Contributions welcome! Please:
 - [ ] GUI frontend (Electron or Swift)
 - [ ] Support for GPT-based Raspberry Pi OS variants
 - [ ] Verification mode: run `fsck` after each operation
-- [ ] Image shrink functionality
+- [ ] Smart minimal image shrink (auto-compute min safe size)
 - [ ] Support for other SBC image formats
 
 ## License
@@ -395,3 +406,10 @@ Built with Linux tools: `sfdisk`, `losetup`, `kpartx`, `e2fsck`, `resize2fs`, `m
 ---
 
 **⚠️ Important**: Always test resized images on non-critical systems first. Keep backups of important data.
+
+## Test Suite
+
+Run `./run-test.sh` to validate core scenarios inside Docker:
+- Test 1: No image change; boot 64MB→256MB; root shrinks and moves (files preserved)
+- Test 2: Image expands 700MB→1500MB; boot 64MB→256MB; root auto-expands (files preserved)
+- Test 3: Image shrinks 700MB→600MB; boot stays 64MB; shrink validated and applied (files preserved)
