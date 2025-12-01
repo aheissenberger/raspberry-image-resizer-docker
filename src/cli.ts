@@ -121,7 +121,14 @@ async function main() {
     const selected = args.device ? normalizeDevice(String(args.device)).disk : await detectRemovableDisk(exec);
     if (!selected) throw new Error("No removable device detected");
     const sizeBytes = await getDiskSizeBytes(exec, selected);
+    const gib = sizeBytes / (1024 ** 3);
+    const gb = sizeBytes / 1_000_000_000;
+    // Recommend a safe rounded-down decimal GB value with 2% headroom, rounded down to 0.1GB
+    let safeGb = Math.floor(gb * 0.98 * 10) / 10;
+    if (safeGb <= 0) safeGb = Math.max(0, Math.floor(gb * 10) / 10 - 0.1);
     console.log(`${selected}: ${bytesToGiB(sizeBytes)} (${sizeBytes} bytes)`);
+    console.log(`Approx capacity: ${gb.toFixed(2)} GB`);
+    console.log(`Recommended --image-size: ${safeGb.toFixed(1)}GB`);
     return;
   }
 

@@ -491,6 +491,52 @@ To build both architectures:
 
 ## Troubleshooting
 
+### Expand Root Partition After Boot (Raspberry Pi OS)
+
+If you resized an image smaller than the SD card to ensure broad compatibility, you can expand the root filesystem on first boot to use the full card size.
+
+Interactive (recommended on a connected Pi):
+
+```bash
+sudo raspi-config
+# Navigate to: System Options → Resize FS (or Advanced Options → Expand Filesystem on older versions)
+# Reboot when prompted
+```
+
+Non-interactive (headless):
+
+```bash
+# Newer Raspberry Pi OS:
+sudo raspi-config --expand-rootfs
+sudo reboot
+
+# Fallback for older raspi-config versions:
+sudo raspi-config nonint do_expand_rootfs
+sudo reboot
+```
+
+Verify after reboot:
+
+```bash
+df -h /
+lsblk
+```
+
+Alternative without raspi-config (works on Debian-based systems):
+
+```bash
+# Identify root partition
+findmnt -no SOURCE /
+
+# Example for the common layout (/dev/mmcblk0p2)
+sudo apt-get update && sudo apt-get install -y cloud-guest-utils
+sudo growpart /dev/mmcblk0 2
+sudo resize2fs /dev/mmcblk0p2
+
+# Verify
+df -h /
+```
+
 ### SD Card Cloning Issues
 
 #### No Devices Detected
