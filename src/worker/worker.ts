@@ -304,12 +304,35 @@ async function run(exe: Executor) {
   // Step 10: Final verification
   INFO("Step 10: Final verification...");
   if (!DRY) {
-    await exe.run(["sfdisk", "-d", loop], { allowNonZeroExit: true });
+    const finalDumpRes = await exe.run(["sfdisk", "-d", loop], { allowNonZeroExit: true });
+    const finalDump = finalDumpRes.stdout;
     await exe.run(["blkid", bootPart, rootPart], { allowNonZeroExit: true });
     
     // Cleanup: detach loop device
     await exe.run(["kpartx", "-d", loop], { allowNonZeroExit: true });
     await exe.run(["losetup", "-d", loop], { allowNonZeroExit: true });
+  }
+
+  // Verbose summary (human readable partition and image sizes)
+  if (env("VERBOSE") === "1" && !DRY) {
+    try {
+      const finalLayout = parseSfdiskDump(await exe.run(["sfdisk", "-d", loop]).then(r => r.stdout), loop);
+      const bootSectors = finalLayout.boot.end - finalLayout.boot.start + 1;
+      const rootSectors = finalLayout.root.end - finalLayout.root.start + 1;
+      const sectorSize = 512;
+      const toMB = (s: number) => (s * sectorSize / 1024 / 1024).toFixed(2);
+      const toGB = (s: number) => (s * sectorSize / 1024 / 1024 / 1024).toFixed(2);
+      const imageBytes = Bun.file(imagePath).size;
+      const imageMB = (imageBytes / 1024 / 1024).toFixed(2);
+      const imageGB = (imageBytes / 1024 / 1024 / 1024).toFixed(2);
+      console.log("[SUMMARY] Final Partition Layout:");
+      console.log(`[SUMMARY] Boot: start=${finalLayout.boot.start} end=${finalLayout.boot.end} sectors=${bootSectors} sizeMB=${toMB(bootSectors)} sizeGB=${toGB(bootSectors)}`);
+      console.log(`[SUMMARY] Root: start=${finalLayout.root.start} end=${finalLayout.root.end} sectors=${rootSectors} sizeMB=${toMB(rootSectors)} sizeGB=${toGB(rootSectors)}`);
+      console.log(`[SUMMARY] Image Size: ${imageBytes} bytes (${imageMB} MB / ${imageGB} GB)`);
+      console.log(`[SUMMARY] Image Path (container): ${imagePath}`);
+    } catch (e) {
+      WARN(`Unable to produce verbose summary: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   INFO("=== Operation completed successfully ===");

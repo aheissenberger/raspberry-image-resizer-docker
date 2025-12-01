@@ -312,6 +312,19 @@ async function main() {
       });
       process.exitCode = result.code;
       if (result.code !== 0) throw new Error(`Worker failed: ${result.code}`);
+      if (args["verbose"]) {
+        if (!args["dry-run"]) {
+          const finalPath = `${workDir}/${workingName}`;
+          const sizeBytes = Bun.file(finalPath).size;
+          const sizeMB = (sizeBytes / 1024 / 1024).toFixed(2);
+          const sizeGB = (sizeBytes / 1024 / 1024 / 1024).toFixed(2);
+          console.log(`[HOST SUMMARY] Final image path: ${finalPath}`);
+          console.log(`[HOST SUMMARY] Final image size: ${sizeBytes} bytes (${sizeMB} MB / ${sizeGB} GB)`);
+          console.log(`[HOST SUMMARY] Partition summary above is from container (sector-accurate).`);
+        } else {
+          console.log(`[HOST SUMMARY] Dry-run: no image modifications performed.`);
+        }
+      }
       console.log("✓ Resize completed");
     } finally {
       // No temporary decompression file to clean; workingPath remains for user
