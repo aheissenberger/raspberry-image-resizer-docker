@@ -176,12 +176,12 @@ async function main() {
 
     // dd command with conv=fsync to flush writes
     if (decomp) {
-      const cmd = `${decomp.join(" ")} ${escapePath(image)} | sudo dd of=${raw} bs=4m conv=fsync status=progress 2>/dev/stderr`;
+      const cmd = `${decomp.join(" ")} ${escapePath(image)} | sudo dd of=${raw} bs=4m conv=fsync status=progress`;
       console.log(`About to WRITE image to device: ${selected} (raw ${raw})`);
-      await exec.run(["bash", "-lc", cmd]);
+      await exec.run(["bash", "-lc", cmd], { onStderrChunk: (s) => process.stderr.write(s) });
     } else {
       console.log(`About to WRITE image to device: ${selected} (raw ${raw})`);
-      await exec.run(["bash", "-lc", `sudo dd if=${escapePath(image)} of=${raw} bs=4m conv=fsync status=progress 2>/dev/stderr`]);
+      await exec.run(["bash", "-lc", `sudo dd if=${escapePath(image)} of=${raw} bs=4m conv=fsync status=progress`], { onStderrChunk: (s) => process.stderr.write(s) });
     }
 
     await exec.run(["sync"], { allowNonZeroExit: true });
