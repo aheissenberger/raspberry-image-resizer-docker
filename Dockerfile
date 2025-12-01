@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     kpartx \
     e2fsprogs \
     dosfstools \
+    partclone \
     rsync \
     zstd \
     xz-utils \

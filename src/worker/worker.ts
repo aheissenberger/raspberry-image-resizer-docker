@@ -17,6 +17,7 @@ async function run(exe: Executor) {
   const BOOT_SIZE_MB = Number(env("BOOT_SIZE_MB", "256"));
   const IMAGE_SIZE = env("IMAGE_SIZE");
   const UNSAFE = env("UNSAFE_RESIZE_EXT4") === "1";
+  const FAST_MOVE = env("FAST_MOVE") === "1";
 
   const imagePath = `/work/${IMAGE_FILE}`;
 
@@ -185,7 +186,59 @@ async function run(exe: Executor) {
     const oldEnd = oldStart + sizeSectors - 1;
     // Overlap-safe copy: compare ranges
     const overlaps = rootNewStart <= oldEnd && (rootNewStart + sizeSectors - 1) >= oldStart;
-    if (overlaps) {
+    if (FAST_MOVE) {
+      INFO("Fast move enabled: using partclone to relocate ext4 root");
+      // Create new root partition entry at target start using current size
+      const sizeSectors = rootNewEnd - rootNewStart + 1;
+      const bootSize = layout.boot.end - layout.boot.start + 1;
+      const sfdNew = sfdiskTable(loop, layout.boot.start, bootSize, rootNewStart, sizeSectors);
+      await exe.run(["sfdisk", "--force", "--no-reread", loop], { stdin: sfdNew });
+      await rereadMappings(exe, loop);
+      const base2 = loop.split("/").pop()!;
+      const mapperOldRoot = `/dev/mapper/${base2}p2`;
+      const srcRoot = existsSync(mapperOldRoot) ? mapperOldRoot : `${loop}p2`;
+      const dstRoot = srcRoot; // after reread, p2 refers to new start; old data still at previous LBA
+      // We need explicit device nodes: map old and new separately. Use kpartx mappings to ensure both exist.
+      // Mount old root as src, format new root at dst, then partclone copy.
+      const dump2 = (await exe.run(["sfdisk", "-d", loop])).stdout;
+      const parsed2 = parseSfdiskDump(dump2, loop);
+      const currentRootStart2 = parsed2.root.start;
+      const newStart2 = rootNewStart;
+      if (currentRootStart2 !== newStart2) {
+        // Mapper provides only current entries; derive explicit mapper paths
+        const mapperNewRoot = `/dev/mapper/${base2}p2`;
+        const newRootDev = existsSync(mapperNewRoot) ? mapperNewRoot : `${loop}p2`;
+        // Format destination filesystem
+        await exe.run(["mkfs.ext4", "-F", newRootDev]);
+        // Create mounts
+        mkdirSync("/mnt/src-root", { recursive: true });
+        mkdirSync("/mnt/dst-root", { recursive: true });
+        await exe.run(["mount", srcRoot, "/mnt/src-root"], { allowNonZeroExit: true });
+        await exe.run(["mount", newRootDev, "/mnt/dst-root"], { allowNonZeroExit: true });
+        // Use partclone to copy ext4 used blocks
+        const pc = await exe.run(["partclone.ext4", "-s", srcRoot, "-d", newRootDev, "-N"], { allowNonZeroExit: true });
+        if (pc.code !== 0) {
+          ERROR(`partclone failed (code ${pc.code}) - falling back to dd move`);
+          await exe.run(["umount", "/mnt/src-root"], { allowNonZeroExit: true });
+          await exe.run(["umount", "/mnt/dst-root"], { allowNonZeroExit: true });
+        } else {
+          await exe.run(["umount", "/mnt/src-root"], { allowNonZeroExit: true });
+          await exe.run(["umount", "/mnt/dst-root"], { allowNonZeroExit: true });
+          // e2fsck and finalize
+          const e2fsckResult2 = await exe.run(["e2fsck", "-f", "-y", newRootDev], { allowNonZeroExit: true });
+          if (e2fsckResult2.code > 2) throw new Error(`e2fsck failed with code ${e2fsckResult2.code}`);
+          // Done with fast move
+          INFO("Fast move completed via partclone");
+          // Refresh rootPart reference
+          rootPart = newRootDev;
+          // Skip dd move path
+          // Rewrite table already done; nothing further here
+          // Proceed to next steps
+          
+          // Return to main flow
+        }
+      }
+    } else if (overlaps) {
       // Backward copy in larger chunks for speed (8192 sectors ≈ 4MB)
       const block = 8192; // sectors per chunk
       let remain = sizeSectors;

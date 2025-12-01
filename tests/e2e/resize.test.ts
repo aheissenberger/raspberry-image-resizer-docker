@@ -52,7 +52,7 @@ describe("Image Resize E2E Tests", () => {
   });
 
   test(
-    "Test 1: Boot expansion with root move (64MB→256MB boot, no image resize)",
+    "Test 1 (fast-move): Boot expansion with root move (64MB→256MB boot, no image resize)",
     async () => {
       console.log("\n========================================");
       console.log("TEST 1: Boot expansion with root move");
@@ -73,6 +73,7 @@ describe("Image Resize E2E Tests", () => {
         bootSizeMB: 256,
         snapshot: true,
         verbose: true,
+        fastMove: true,
       });
 
       // Check test execution succeeded
@@ -105,7 +106,44 @@ describe("Image Resize E2E Tests", () => {
   );
 
   test(
-    "Test 2: Image expansion with boot resize (700MB→1500MB, 64MB→256MB boot)",
+    "Test 1 (dd-move): Boot expansion with root move using dd",
+    async () => {
+      console.log("\n========================================");
+      console.log("TEST 1 (dd): Boot expansion with root move via dd");
+      console.log("No image size change, boot 64MB→256MB");
+      console.log("Root must shrink to accommodate");
+      console.log("========================================\n");
+
+      const snapshots: SnapshotFiles = {
+        rootPre: join(process.cwd(), "snapshot-pre.txt"),
+        rootPost: join(process.cwd(), "snapshot-post.txt"),
+        bootPre: join(process.cwd(), "snapshot-boot-pre.txt"),
+        bootPost: join(process.cwd(), "snapshot-boot-post.txt"),
+      };
+
+      const result = await runDockerTest(IMAGE_TAG, {
+        filename: "test.img",
+        initialSizeMB: 700,
+        bootSizeMB: 256,
+        snapshot: true,
+        verbose: true,
+        fastMove: false,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain("[TEST] All done.");
+
+      const { rootValid, bootValid } = await validateSnapshots(snapshots);
+      expect(rootValid).toBe(true);
+      expect(bootValid).toBe(true);
+      await cleanupSnapshots(snapshots);
+      console.log("[E2E] Test 1 (dd): PASSED\n");
+    },
+    TEST_TIMEOUT
+  );
+
+  test(
+    "Test 2 (fast-move): Image expansion with boot resize (700MB→1500MB, 64MB→256MB boot)",
     async () => {
       console.log("\n========================================");
       console.log("TEST 2: Image expansion with boot resize");
@@ -127,6 +165,7 @@ describe("Image Resize E2E Tests", () => {
         bootSizeMB: 256,
         snapshot: true,
         verbose: true,
+        fastMove: true,
       });
 
       // Check test execution succeeded
@@ -156,7 +195,45 @@ describe("Image Resize E2E Tests", () => {
   );
 
   test(
-    "Test 3: Image shrink without boot change (700MB→600MB, boot stays 64MB)",
+    "Test 2 (dd-move): Image expansion path using dd",
+    async () => {
+      console.log("\n========================================");
+      console.log("TEST 2 (dd): Image expansion with boot resize via dd");
+      console.log("Image 700MB→1500MB, boot 64MB→256MB");
+      console.log("Root expands to use new space");
+      console.log("========================================\n");
+
+      const snapshots: SnapshotFiles = {
+        rootPre: join(process.cwd(), "snapshot-pre.txt"),
+        rootPost: join(process.cwd(), "snapshot-post.txt"),
+        bootPre: join(process.cwd(), "snapshot-boot-pre.txt"),
+        bootPost: join(process.cwd(), "snapshot-boot-post.txt"),
+      };
+
+      const result = await runDockerTest(IMAGE_TAG, {
+        filename: "test-expand.img",
+        initialSizeMB: 700,
+        targetSizeMB: 1500,
+        bootSizeMB: 256,
+        snapshot: true,
+        verbose: true,
+        fastMove: false,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain("[TEST] All done.");
+
+      const { rootValid, bootValid } = await validateSnapshots(snapshots);
+      expect(rootValid).toBe(true);
+      expect(bootValid).toBe(true);
+      await cleanupSnapshots(snapshots);
+      console.log("[E2E] Test 2 (dd): PASSED\n");
+    },
+    TEST_TIMEOUT
+  );
+
+  test(
+    "Test 3 (fast-move): Image shrink without boot change (700MB→600MB, boot stays 64MB)",
     async () => {
       console.log("\n========================================");
       console.log("TEST 3: Image shrink without boot change");
@@ -179,6 +256,7 @@ describe("Image Resize E2E Tests", () => {
         bootSizeMB: 64,
         snapshot: true,
         verbose: true,
+        fastMove: true,
       });
 
       // Check test execution succeeded
@@ -203,6 +281,45 @@ describe("Image Resize E2E Tests", () => {
       await cleanupSnapshots(snapshots);
 
       console.log("[E2E] Test 3: PASSED\n");
+    },
+    TEST_TIMEOUT
+  );
+
+  test(
+    "Test 3 (dd-move): Image shrink path using dd",
+    async () => {
+      console.log("\n========================================");
+      console.log("TEST 3 (dd): Image shrink without boot change via dd");
+      console.log("Image 700MB→600MB, boot stays 64MB");
+      console.log("Root shrinks to fit new image size");
+      console.log("========================================\n");
+
+      const snapshots: SnapshotFiles = {
+        rootPre: join(process.cwd(), "snapshot-pre.txt"),
+        rootPost: join(process.cwd(), "snapshot-post.txt"),
+        bootPre: join(process.cwd(), "snapshot-boot-pre.txt"),
+        bootPost: join(process.cwd(), "snapshot-boot-post.txt"),
+      };
+
+      const result = await runDockerTest(IMAGE_TAG, {
+        filename: "test-shrink.img",
+        initialSizeMB: 700,
+        targetSizeMB: 600,
+        freeTailMB: 150,
+        bootSizeMB: 64,
+        snapshot: true,
+        verbose: true,
+        fastMove: false,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain("[TEST] All done.");
+
+      const { rootValid, bootValid } = await validateSnapshots(snapshots);
+      expect(rootValid).toBe(true);
+      expect(bootValid).toBe(true);
+      await cleanupSnapshots(snapshots);
+      console.log("[E2E] Test 3 (dd): PASSED\n");
     },
     TEST_TIMEOUT
   );

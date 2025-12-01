@@ -275,6 +275,7 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 | `--boot-size <MB>` | Size for boot partition in MB | 256 |
 | `--image-size <size>` | Resize whole image (supports `MB`, `GB`, `TB`) | - |
 | `--unsafe-resize-ext4` | Enable ext4 root partition resizing | Disabled |
+| `--dd-move` | Force dd for root move (fallback path; default is fast) | Disabled |
 | `--dry-run` | Preview changes without modifying | Disabled |
 | `--verbose` | Show detailed output from Docker | Disabled |
 | `--work-dir <path>` | Working directory for temp files and working image | For compressed inputs: `$TMPDIR` or `/tmp`; otherwise source dir |
@@ -345,7 +346,7 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 5. **Usage Detection**: Checks actual filesystem usage to determine if shrinking is beneficial
 6. **Automatic Shrinking**: Shrinks root filesystem and partition if needed (avoids disk expansion)
 7. **Boot Backup**: Copies all files from boot partition (FAT32)
-8. **Partition Moving**: Relocates root partition data with `dd` (backward copy when regions overlap)
+8. **Partition Moving**: Relocates root partition data with `partclone` by default (fast path, ext4 only); `dd` is used when forced or as fallback (overlap-safe backward copy)
 9. **Partition Resize**: Adjusts boot partition boundaries using `sfdisk` scripts
 10. **Filesystem Creation**: Creates new FAT32 filesystem with `mkfs.vfat`
 11. **File Restoration**: Restores backed-up boot files

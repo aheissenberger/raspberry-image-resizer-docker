@@ -18,7 +18,7 @@ function usage() {
   `  size                       Show size of removable device (macOS)\n\n` +
 `Global Options:\n  -h, --help                 Show help\n  -v, --version              Show version\n\n` +
   `Clone/Write/Size Options:\n  --compress <zstd|xz|gzip>  Compress output during clone\n  --level <n>                Compression level\n  --block-size <SIZE>        dd block size (default 4m)\n  --device </dev/diskN>      Override auto-detect; use specific disk (advanced)\n  --yes                      Skip confirmations (write only; dangerous)\n  --preview                  Print the dd command and exit (no changes)\n\n` +
-`Resize Options:\n  --boot-size <MB>           Target boot partition size (default 256)\n  --image-size <SIZE>        Change overall image size (e.g. 32GB, 8192MB)\n  --unsafe-resize-ext4       Run resize2fs on root when not moving (unsafe)\n  --dry-run                  Plan only, do not modify\n  --verbose                  Verbose logs\n  --docker-image <name>      Docker image name (default rpi-image-resizer:latest)\n  --work-dir <path>          Working directory for temp files (default: TMPDIR or /tmp for compressed)\n`);
+`Resize Options:\n  --boot-size <MB>           Target boot partition size (default 256)\n  --image-size <SIZE>        Change overall image size (e.g. 32GB, 8192MB)\n  --unsafe-resize-ext4       Run resize2fs on root when not moving (unsafe)\n  --dd-move                  Use dd for root move instead of fast partclone (default is fast)\n  --dry-run                  Plan only, do not modify\n  --verbose                  Verbose logs\n  --docker-image <name>      Docker image name (default rpi-image-resizer:latest)\n  --work-dir <path>          Working directory for temp files (default: TMPDIR or /tmp for compressed)\n`);
 }
 
 function escapePath(p: string) {
@@ -219,6 +219,7 @@ async function main() {
       { name: "boot-size", type: "number", default: 256 },
       { name: "image-size", type: "string" },
       { name: "unsafe-resize-ext4", type: "boolean" },
+      { name: "dd-move", type: "boolean" },
       { name: "dry-run", type: "boolean" },
       { name: "verbose", type: "boolean" },
       { name: "docker-image", type: "string" },
@@ -297,6 +298,7 @@ async function main() {
         BOOT_SIZE_MB: String(args["boot-size"] ?? 256),
         IMAGE_SIZE: args["image-size"] ? String(args["image-size"]) : "",
         UNSAFE_RESIZE_EXT4: args["unsafe-resize-ext4"] ? "1" : "0",
+        FAST_MOVE: args["dd-move"] ? "0" : "1",
         DRY_RUN: args["dry-run"] ? "1" : "0",
         VERBOSE: args["verbose"] ? "1" : "0",
       } as Record<string, string>;
