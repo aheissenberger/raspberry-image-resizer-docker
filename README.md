@@ -263,6 +263,7 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 | `--unsafe-resize-ext4` | Enable ext4 root partition resizing | Disabled |
 | `--dry-run` | Preview changes without modifying | Disabled |
 | `--verbose` | Show detailed output from Docker | Disabled |
+| `--work-dir <path>` | Working directory for temp files and working image | For compressed inputs: `$TMPDIR` or `/tmp`; otherwise source dir |
 | `-h`, `--help` | Show help message | - |
 
 ### Examples
@@ -275,6 +276,9 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 **Resize a compressed image (auto-detects .zst/.xz/.gz):**
 ```bash
 ./rpi-tool resize raspios.img.zst --boot-size 512
+
+# Use a custom working directory to avoid space issues in source dir
+./rpi-tool resize raspios.img.zst --work-dir ~/Images/work --boot-size 512
 ```
 
 **Preview changes without modifying:**
@@ -299,7 +303,13 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 
 ## How It Works
 
-1. **Backup Creation**: Creates timestamped backup (e.g., `image_202511261430.img`)
+1. **Backup & Working Copy**:
+   - If the input is compressed (`.img.zst/.xz/.gz`):
+     - Creates a timestamped backup of the original compressed file in its source directory (e.g., `image_202511261430.zst`)
+     - Decompresses directly into a working `.img` in the working directory (defaults to `$TMPDIR` or `/tmp`)
+   - If the input is uncompressed (`.img`):
+     - Copies the original `.img` into the working directory as a timestamped working `.img`
+   - The original compressed file is never modified
 2. **Docker Launch**: Starts privileged Linux container with image mounted
 3. **Loop Device**: Attaches image as `/dev/loop0` inside container
 4. **Partition Analysis**: Examines partition table and filesystems
@@ -566,9 +576,9 @@ The Docker image will be automatically rebuilt on the next resize operation.
 
 ### Image Resizing
 - Only works with `.img` files or compressed `.img.zst/.xz/.gz` files (not raw block devices)
-- Compressed images are automatically decompressed to a temporary file during processing
-- Original compressed image is never modified (backup created from decompressed version)
-- Temporary decompressed files are automatically cleaned up after processing
+- Compressed images are automatically decompressed directly into a working `.img` in the working directory (default: `$TMPDIR` or `/tmp`)
+- Original compressed image is never modified; a timestamped backup of the compressed file is created in the source directory
+- The working `.img` remains in the working directory after processing (no extra copy back to source)
 - FAT32 resizing is destructive (requires backup/restore)
 - Some unusual partition layouts (NOOBS, multi-boot) may not be supported
 - Boot partition must be FAT32 (vfat)

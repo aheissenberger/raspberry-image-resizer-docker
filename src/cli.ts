@@ -17,7 +17,7 @@ function usage() {
 `Commands:\n  version                    Print version\n  clone <output-image>       Clone SD to image (macOS)\n  write <image>              Write image to SD (macOS)\n  resize <image>             Resize and adjust partitions (Docker)\n  clean                      Remove Docker images\n\n` +
 `Global Options:\n  -h, --help                 Show help\n  -v, --version              Show version\n\n` +
 `Clone/Write Options:\n  --compress <zstd|xz|gzip>  Compress output during clone\n  --level <n>                Compression level\n  --block-size <SIZE>        dd block size (default 4m)\n  --device </dev/diskN>      Override auto-detect; use specific disk (advanced)\n  --yes                      Skip confirmations (write only; dangerous)\n  --preview                  Print the dd command and exit (no changes)\n\n` +
-`Resize Options:\n  --boot-size <MB>           Target boot partition size (default 256)\n  --image-size <SIZE>        Change overall image size (e.g. 32GB, 8192MB)\n  --unsafe-resize-ext4       Run resize2fs on root when not moving (unsafe)\n  --dry-run                  Plan only, do not modify\n  --verbose                  Verbose logs\n  --docker-image <name>      Docker image name (default rpi-image-resizer:latest)\n`);
+`Resize Options:\n  --boot-size <MB>           Target boot partition size (default 256)\n  --image-size <SIZE>        Change overall image size (e.g. 32GB, 8192MB)\n  --unsafe-resize-ext4       Run resize2fs on root when not moving (unsafe)\n  --dry-run                  Plan only, do not modify\n  --verbose                  Verbose logs\n  --docker-image <name>      Docker image name (default rpi-image-resizer:latest)\n  --work-dir <path>          Working directory for temp files (default: TMPDIR or /tmp for compressed)\n`);
 }
 
 function escapePath(p: string) {
@@ -183,17 +183,32 @@ async function main() {
       { name: "unsafe-resize-ext4", type: "boolean" },
       { name: "dry-run", type: "boolean" },
       { name: "verbose", type: "boolean" },
-      { name: "docker-image", type: "string" }
+      { name: "docker-image", type: "string" },
+      { name: "work-dir", type: "string" }
     ]);
     const image = positional[0];
     if (!image) throw new Error("Missing <image>");
 
     const dockerImage = (args["docker-image"] as string) || "rpi-image-resizer:latest";
 
-    // If compressed, decompress to temp file first (unless dry-run)
-    let workImage = image;
+    // Prepare working directory and file names
+    const ts = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0,12);
+    const srcDir = dirname(image);
+    const imageBase = basename(image);
+    const lastDot = imageBase.lastIndexOf(".");
+    const bareOriginal = lastDot > 0 ? imageBase.slice(0, lastDot) : imageBase;
+    const extOriginal = lastDot > 0 ? imageBase.slice(lastDot) : "";
+
     const algo = detectCompressionByExt(image);
-    let tempPath: string | undefined;
+    const defaultTmp = process.env.TMPDIR || "/tmp";
+    const workDir = String(args["work-dir"] ?? (algo && !args["dry-run"] ? defaultTmp : srcDir));
+
+    // Working copy name (always .img) and full path
+    const workingName = `${bareOriginal}_${ts}.img`;
+    const workingPath = `${workDir}/${workingName}`;
+
+    // Prepare working image: decompress directly to workingPath for compressed inputs
+    let workImage = image;
     if (algo) {
       console.error(`Detected ${algo} compressed image`);
       if (args["dry-run"]) {
@@ -201,12 +216,10 @@ async function main() {
         workImage = image; // Use compressed file path for dry-run
       } else {
         const decomp = buildDecompressor(algo);
-        tempPath = `${image}.decompressed.tmp`;
-        // Use shell redirection for decompression since these tools read from file args
         decomp.push(image);
         const proc = spawn({
           cmd: decomp,
-          stdout: Bun.file(tempPath),
+          stdout: Bun.file(workingPath),
           stderr: "pipe",
         });
         const exitCode = await proc.exited;
@@ -215,39 +228,30 @@ async function main() {
         if (exitCode !== 0) {
           throw new Error(`Decompression failed with code ${exitCode}\n${stderr}`);
         }
-        workImage = tempPath;
+        workImage = workingPath;
+        console.log(`Working copy created: ${workingPath}`);
       }
     }
 
     try {
-      // Create a timestamped backup copy unless dry-run
-      const ts = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0,12);
-      const srcDir = dirname(image);
-      const imageBase = basename(image);
-      const lastDot = imageBase.lastIndexOf(".");
-      const bareOriginal = lastDot > 0 ? imageBase.slice(0, lastDot) : imageBase;
-      const extOriginal = lastDot > 0 ? imageBase.slice(lastDot) : "";
-
-      // Working copy name (always .img)
-      const workingName = `${bareOriginal}_${ts}.img`;
+      // Create backups/working copy unless dry-run
       let targetImage = workingName;
 
       if (!args["dry-run"]) {
         if (algo) {
-          // Backup the compressed source
+          // Backup the compressed source in its original directory
           const compressedBackupName = `${bareOriginal}_${ts}${extOriginal}`;
           await exec.run(["cp", image, `${srcDir}/${compressedBackupName}`]);
           console.log(`Backup created: ${srcDir}/${compressedBackupName}`);
-          // Create working copy from decompressed temp
-          await exec.run(["cp", workImage, `${srcDir}/${workingName}`]);
-          console.log(`Working copy created: ${srcDir}/${workingName}`);
+          // Working file already created via decompression to workingPath
         } else {
-          // Uncompressed: single backup/working copy
-          await exec.run(["cp", image, `${srcDir}/${workingName}`]);
-          console.log(`Backup created: ${srcDir}/${workingName}`);
+          // Uncompressed: copy source to workDir as working file
+          await exec.run(["cp", image, workingPath]);
+          console.log(`Working copy created: ${workingPath}`);
         }
       } else {
-        console.log("Dry-run: not creating backup, operating read-only");
+        console.log("Dry-run: not creating backup or working copy, operating read-only");
+        targetImage = imageBase; // use original name for dry-run
       }
 
       const env = {
@@ -264,16 +268,14 @@ async function main() {
 
       const result = await runWorker(exec, {
         image: dockerImage,
-        workdir: srcDir,
+        workdir: workDir,
         env,
       });
       process.exitCode = result.code;
       if (result.code !== 0) throw new Error(`Worker failed: ${result.code}`);
       console.log("✓ Resize completed");
     } finally {
-      if (tempPath) {
-        await exec.run(["rm", "-f", tempPath], { allowNonZeroExit: true });
-      }
+      // No temporary decompression file to clean; workingPath remains for user
     }
     return;
   }
