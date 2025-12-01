@@ -331,18 +331,32 @@ async function run(exe: Executor) {
   // Verbose summary (human readable partition and image sizes)
   if (env("VERBOSE") === "1" && !DRY) {
     try {
-      const finalLayout = parseSfdiskDump(await exe.run(["sfdisk", "-d", loop]).then(r => r.stdout), loop);
-      const bootSectors = finalLayout.boot.end - finalLayout.boot.start + 1;
-      const rootSectors = finalLayout.root.end - finalLayout.root.start + 1;
+      const dumpTxt = await exe.run(["sfdisk", "-d", loop]).then(r => r.stdout);
       const sectorSize = 512;
-      const toMB = (s: number) => (s * sectorSize / 1024 / 1024).toFixed(2);
-      const toGB = (s: number) => (s * sectorSize / 1024 / 1024 / 1024).toFixed(2);
+      const toMB = (bytes: number) => (bytes / 1024 / 1024).toFixed(2);
+      const toGB = (bytes: number) => (bytes / 1024 / 1024 / 1024).toFixed(2);
       const imageBytes = Bun.file(imagePath).size;
-      const imageMB = (imageBytes / 1024 / 1024).toFixed(2);
-      const imageGB = (imageBytes / 1024 / 1024 / 1024).toFixed(2);
+      const imageMB = toMB(imageBytes);
+      const imageGB = toGB(imageBytes);
       console.log("[SUMMARY] Final Partition Layout:");
-      console.log(`[SUMMARY] Boot: start=${finalLayout.boot.start} end=${finalLayout.boot.end} sectors=${bootSectors} sizeMB=${toMB(bootSectors)} sizeGB=${toGB(bootSectors)}`);
-      console.log(`[SUMMARY] Root: start=${finalLayout.root.start} end=${finalLayout.root.end} sectors=${rootSectors} sizeMB=${toMB(rootSectors)} sizeGB=${toGB(rootSectors)}`);
+      const lines = dumpTxt.split("\n");
+      const base = loop.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      for (const line of lines) {
+        const m = line.match(new RegExp(`^${base}p(\\d+)\\s*:\\s*(.*)$`));
+        if (m) {
+          const partNum = m[1];
+          const startMatch = line.match(/start=\s*(\d+)/);
+          const sizeMatch = line.match(/size=\s*(\d+)/);
+          const typeMatch = line.match(/type=([0-9a-fA-Fx]+)/);
+          if (startMatch && sizeMatch) {
+            const start = Number(startMatch[1]);
+            const sizeSectors = Number(sizeMatch[1]);
+            const end = start + sizeSectors - 1;
+            const bytes = sizeSectors * sectorSize;
+            console.log(`[SUMMARY] p${partNum}: start=${start} end=${end} sectors=${sizeSectors} sizeMB=${toMB(bytes)} sizeGB=${toGB(bytes)}${typeMatch ? ` type=${typeMatch[1]}` : ""}`);
+          }
+        }
+      }
       console.log(`[SUMMARY] Image Size: ${imageBytes} bytes (${imageMB} MB / ${imageGB} GB)`);
       console.log(`[SUMMARY] Image Path (container): ${imagePath}`);
     } catch (e) {
