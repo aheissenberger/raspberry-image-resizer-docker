@@ -1,6 +1,6 @@
 {
   "name": "raspberry-image-resizer-docker",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Cross-platform Raspberry Pi image resizing and SD card cloning tool with Bun + TypeScript",
   "scripts": {
     "test": "bun test tests/*.test.ts --timeout=300000",
