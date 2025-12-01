@@ -1,44 +1,20 @@
 class RpiImageResizer < Formula
-  desc "Cross-platform Raspberry Pi image resizing and SD card cloning tool"
+  desc "Raspberry Pi image resize and partition adjuster (CLI)"
   homepage "https://github.com/aheissenberger/raspberry-image-resizer-docker"
   version "0.0.2"
-  
-  # Update these URLs when creating a GitHub release
+
   if Hardware::CPU.arm?
     url "https://github.com/aheissenberger/raspberry-image-resizer-docker/releases/download/v0.0.2/rpi-tool-darwin-arm64.tar.gz"
-    sha256 "1ba2cca5a6a7088d2421a99fd5067ed39e9924864b31e8eef277b6645850dc9d" # Add SHA256 checksum after building release
+    sha256 "087846cfbfe18a6cd2bee7feaac1893ea19c99029fca1ec69bd3c3f6b00402ce"
   else
     url "https://github.com/aheissenberger/raspberry-image-resizer-docker/releases/download/v0.0.2/rpi-tool-darwin-amd64.tar.gz"
-    sha256 "" # Add SHA256 checksum after building release
+    sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   end
 
-  depends_on "docker"
+  depends_on "docker" => :recommended
 
   def install
     bin.install "rpi-tool"
-  end
-
-  def caveats
-    <<~EOS
-      rpi-image-resizer requires Docker Desktop to be installed and running.
-      
-      Install Docker Desktop from: https://www.docker.com/products/docker-desktop
-
-      On first run, the tool will automatically build its Docker image (~2 minutes).
-
-      Usage examples:
-        # Clone SD card to image
-        rpi-tool clone raspios-backup.img
-
-        # Resize boot partition
-        rpi-tool resize raspios.img --boot-size 512
-
-        # Write image to SD card
-        rpi-tool write raspios.img
-
-      For more information:
-        rpi-tool --help
-    EOS
   end
 
   test do

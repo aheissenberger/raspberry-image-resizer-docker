@@ -10,7 +10,7 @@ const VERSION: string = (pkg as any).version || "0.0.0";
 
 function usage() {
   console.log(`raspberry-image-tool v${VERSION}\n\n` +
-`Usage:\n  bun run src/cli.ts <command> [options]\n\n` +
+`Usage:\n  rpi-tool <command> [options]\n\n` +
 `Commands:\n  version                    Print version\n  clone <output-image>       Clone SD to image (macOS)\n  write <image>              Write image to SD (macOS)\n  resize <image>             Resize and adjust partitions (Docker)\n\n` +
 `Global Options:\n  -h, --help                 Show help\n  -v, --version              Show version\n\n` +
 `Clone/Write Options:\n  --compress <zstd|xz|gzip>  Compress output during clone\n  --level <n>                Compression level\n\n` +

@@ -12,7 +12,8 @@
     "build:cli": "bun build src/cli.ts --compile --outfile dist/rpi-tool",
     "build": "bun run build:worker && bun run build:test-helper && bun run build:cli",
     "docker:build": "bun run build:worker && bun run build:test-helper && docker build -t rpi-image-resizer:latest .",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "release": "bash ./scripts/release.sh"
   },
   "devDependencies": {
     "@types/bun": "latest",

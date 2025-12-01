@@ -547,6 +547,17 @@ The write command must:
   - Binary size: 57MB (includes Bun runtime + embedded resources)
   - Users only need Docker Desktop running
 - ✅ **Production Ready**: Compiled worker (16.58 KB), compiled CLI (57MB), zero bash dependencies, single-binary distribution
+- ✅ **Release Automation**:
+  - Automated build script (`scripts/build-release.sh`) for binary and tarball creation
+  - Formula update script (`scripts/update-formula.js`) auto-injects version and SHA256
+  - Complete release workflow script (`scripts/release.sh`) handles:
+    - Build artifacts (binary + tarball)
+    - Formula version/SHA256 updates
+    - Git commit and push of formula changes
+    - GitHub release creation or asset upload (via GitHub CLI)
+  - Homebrew formula compliance: passes `brew audit` with zero warnings
+  - Multi-architecture support: arm64 and amd64 tarballs with separate SHA256
+  - Single command release: `bun run release`
 
 ### Future Enhancements
 
@@ -554,6 +565,11 @@ The write command must:
 - Support for GPT‑based Raspberry Pi OS variants
 - Verification mode: run `fsck` after each operation
 - Automatic image shrink: analyze partitions and shrink image to minimum size plus configurable margin
+- **Release automation improvements**:
+  - Cross-compilation support for amd64 from arm64 hosts (and vice versa)
+  - GitHub Actions workflow for multi-arch releases
+  - Automated formula publishing to Homebrew tap repository
+  - Version bump automation integrated into release script
 - **Advanced partition operations**:
 - Docker image versions must be pinned (e.g., Ubuntu 24.04).
 - All commands executed inside container must be logged (verbose mode).

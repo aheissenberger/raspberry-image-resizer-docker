@@ -339,9 +339,71 @@ raspberry-image-resizer-docker/
 │   ├── rpi-tool               # Standalone CLI executable
 │   └── worker/
 │       └── worker.js          # Built worker for Docker
+├── scripts/                   # Build and release automation
+│   ├── build-release.sh       # Builds binary and creates release tarball
+│   ├── update-formula.js      # Auto-updates version and SHA256 in formula
+│   └── release.sh             # Complete release workflow (build → update → commit → publish)
+├── rpi-image-resizer.rb       # Homebrew formula (tap distribution)
 ├── REQUIREMENTS.md            # Detailed requirements document
 └── README.md                  # This file
 ```
+
+## Release and Distribution
+
+### Homebrew Formula Management
+
+The project includes automated release tooling:
+
+**Build and release:**
+```bash
+# Complete release workflow (automated)
+bun run release
+```
+
+This script:
+1. Builds the binary for current architecture (arm64 or amd64)
+2. Creates tarball in `release/rpi-tool-darwin-<arch>.tar.gz`
+3. Generates SHA256 checksum
+4. Updates `rpi-image-resizer.rb` with version and checksum
+5. Commits formula changes to repository
+6. Creates or updates GitHub release with assets
+
+**Manual steps (if needed):**
+```bash
+# Build binary and tarball
+./scripts/build-release.sh
+
+# Update formula with version and SHA256
+node ./scripts/update-formula.js
+
+# Publish formula to tap
+cp rpi-image-resizer.rb "$(brew --repo aheissenberger/rpi-tools)/Formula/"
+cd "$(brew --repo aheissenberger/rpi-tools)"
+git add Formula/rpi-image-resizer.rb
+git commit -m "chore: update rpi-image-resizer to v0.0.2"
+git push
+```
+
+**Formula validation:**
+```bash
+# Audit formula for Homebrew standards compliance
+brew audit rpi-image-resizer
+
+# Test installation locally
+brew reinstall rpi-image-resizer
+```
+
+### Multi-Architecture Support
+
+The Homebrew formula supports both Apple Silicon and Intel Macs:
+- **arm64**: Built on Apple Silicon Mac
+- **amd64**: Built on Intel Mac or via cross-compilation
+
+To build both architectures:
+1. Build arm64 tarball on Apple Silicon Mac
+2. Build amd64 tarball on Intel Mac (or use GitHub Actions)
+3. Run `node ./scripts/update-formula.js` to update both SHA256 values
+4. Run `bun run release` to publish release with both assets
 
 ## Troubleshooting
 
@@ -561,6 +623,8 @@ Contributions welcome! Please:
 4. Follow existing TypeScript code style and error handling patterns
 5. Add unit tests using Bun's native test framework
 6. Ensure `bun test` passes before submitting
+7. Run `brew audit rpi-image-resizer` to validate formula compliance before release
+8. Update version in `package.json` using `bun version` before running release script
 
 ## Future Enhancements
 
