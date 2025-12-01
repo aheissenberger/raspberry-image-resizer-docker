@@ -85,11 +85,11 @@ This will:
 
 ### SD Card: Clone & Write
 
-The `clone-sd.sh` script handles cloning and writing.
+The `clone-sd.sh` script handles cloning and writing, with optional compression support.
 
 **Clone syntax:**
 ```bash
-./clone-sd.sh clone <output-image-path>
+./clone-sd.sh clone <output-image-path> [--compress <algorithm>] [--level <1-9|1-19>]
 ```
 
 **Write syntax:**
@@ -97,9 +97,28 @@ The `clone-sd.sh` script handles cloning and writing.
 ./clone-sd.sh write <image-path>
 ```
 
+**Compression options:**
+- `--compress <algorithm>`: Compress output using `zstd`, `xz`, or `gzip`
+- `--level <1-9|1-19>`: Compression level (zstd: 1-19, xz/gzip: 1-9)
+
+**Compression examples:**
+```bash
+# Clone with zstd compression (fast, good compression)
+./clone-sd.sh clone raspios-backup.img.zst --compress zstd --level 3
+
+# Clone with xz compression (slow, best compression)
+./clone-sd.sh clone raspios-backup.img.xz --compress xz --level 9
+
+# Clone with gzip compression (moderate speed and compression)
+./clone-sd.sh clone raspios-backup.img.gz --compress gzip --level 6
+
+# Write a compressed image (auto-detects .zst/.xz/.gz)
+./clone-sd.sh write raspios-backup.img.zst
+```
+
 **Clone process:**
 1. Insert your Raspberry Pi SD card into your Mac
-2. Run the clone script
+2. Run the clone script (with optional compression flags)
 3. Select the device from the numbered list (filtered for Raspberry Pi indicators)
 4. Confirm the operation
 5. Wait for cloning to complete (can take 30 minutes to 2+ hours)
@@ -107,7 +126,7 @@ The `clone-sd.sh` script handles cloning and writing.
 
 **Write process:**
 1. Ensure the target removable storage device is connected
-2. Run the write command with a valid image path
+2. Run the write command with a valid image path (compressed or uncompressed)
 3. Select the target device from the list (shows all removable devices ≤ 2TB)
 4. Confirm with "yes", then type "WRITE" to proceed (destructive)
 5. The tool unmounts the target and writes the image with `dd`
@@ -115,10 +134,13 @@ The `clone-sd.sh` script handles cloning and writing.
 **Notes:**
 - **Clone**: Only lists devices with Raspberry Pi indicators (`cmdline.txt`, `config.txt`, etc.) for safety
 - **Write**: Lists all removable devices ≤ 2TB (no Pi detection) - use with caution
+- **Compression**: Requires `zstd`, `xz`, or `gzip` installed (install via Homebrew: `brew install zstd xz`)
+- **Write decompression**: Automatically detects `.zst`, `.xz`, `.gz` extensions and decompresses on-the-fly
 - Requires sudo privileges for `dd` operation
 - Uses raw device (`rdisk`) for faster performance
 - Press `Ctrl+T` during operations to see progress
 - Clone automatically checks for sufficient disk space
+- Compressed images save significant disk space (often 50-70% reduction)
 - On macOS, only mountable filesystems (e.g., FAT32 boot) will remount; ext4 root does not mount natively
 
 ---
@@ -147,6 +169,11 @@ The `clone-sd.sh` script handles cloning and writing.
 **Resize boot partition to 512MB:**
 ```bash
 ./resize-image.sh raspios.img --boot-size 512
+```
+
+**Resize a compressed image (auto-detects .zst/.xz/.gz):**
+```bash
+./resize-image.sh raspios.img.zst --boot-size 512
 ```
 
 **Preview changes without modifying:**
@@ -268,9 +295,31 @@ dd: /dev/rdisk2: Permission denied
 ```
 **Solution:** Free up space or choose a different output location with more available space.
 
+#### Compression Tool Not Found
+```
+[ERROR] Compression tool 'zstd' is not installed
+```
+**Solution:** Install the required tool using Homebrew:
+```bash
+brew install zstd   # For zstd compression
+brew install xz     # For xz compression
+# gzip is pre-installed on macOS
+```
+
 ---
 
 ### Image Resizing Issues
+
+### Compressed Image Cannot Be Decompressed
+```
+[ERROR] Decompression tool 'zstd' is not installed
+```
+**Solution:** Install the required decompression tool using Homebrew:
+```bash
+brew install zstd   # For .zst files
+brew install xz     # For .xz files
+# gzip is pre-installed on macOS
+```
 
 ### Docker Not Running
 ```
@@ -307,11 +356,16 @@ dd: /dev/rdisk2: Permission denied
 ### SD Card Cloning
 - Only works on macOS (uses `diskutil` and `dd`)
 - Requires physical SD card reader
-- Clones entire SD card (may result in large files)
-- Cannot clone to raw devices, only to `.img` files
+- Clones entire SD card (may result in large files without compression)
+- Cannot clone to raw devices, only to `.img` files (or compressed `.img.zst/.xz/.gz`)
+- Compression requires `zstd`, `xz`, or `gzip` installed via Homebrew
+- Multithreaded compression (zstd/xz) uses all available CPU cores for faster processing
 
 ### Image Resizing
-- Only works with `.img` files (not raw block devices)
+- Only works with `.img` files or compressed `.img.zst/.xz/.gz` files (not raw block devices)
+- Compressed images are automatically decompressed to a temporary file during processing
+- Original compressed image is never modified (backup created from decompressed version)
+- Temporary decompressed files are automatically cleaned up after processing
 - FAT32 resizing is destructive (requires backup/restore)
 - Some unusual partition layouts (NOOBS, multi-boot) may not be supported
 - Boot partition must be FAT32 (vfat)
@@ -409,7 +463,26 @@ Built with Linux tools: `sfdisk`, `losetup`, `kpartx`, `e2fsck`, `resize2fs`, `m
 
 ## Test Suite
 
-Run `./run-test.sh` to validate core scenarios inside Docker:
+### Core Functionality Tests
+
+Run `./run-test.sh` to validate core resize scenarios inside Docker:
 - Test 1: No image change; boot 64MB→256MB; root shrinks and moves (files preserved)
 - Test 2: Image expands 700MB→1500MB; boot 64MB→256MB; root auto-expands (files preserved)
 - Test 3: Image shrinks 700MB→600MB; boot stays 64MB; shrink validated and applied (files preserved)
+
+### Compression Workflow Tests
+
+Run `./test-compression.sh` to validate compression support across all algorithms:
+- **Tool Validation**: Verifies zstd, xz, and gzip are available
+- **Level Validation**: Tests compression level bounds (zstd: 1-19, xz/gzip: 1-9)
+- **Detection Tests**: Validates automatic detection of .zst/.xz/.gz extensions
+- **Compression Creation**: Tests creating compressed images with all three algorithms
+- **Resize Compressed**: Tests resizing .zst, .xz, and .gz images with automatic decompression
+- **Cleanup Tests**: Verifies temporary decompressed files are properly cleaned up
+
+All 32 compression tests validate:
+- Compressed images are created successfully with significant size reduction
+- Original compressed files remain unchanged during resize operations
+- Temporary decompressed files are automatically cleaned up
+- Resized images have valid partition tables and filesystems
+- Tool availability and compression level validation work correctly

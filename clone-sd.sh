@@ -42,16 +42,24 @@ Commands:
 Options:
     -h, --help                  Show this help message
     -v, --verbose               Show detailed debug output
+    --compress <algorithm>      Compress output (zstd|xz|gzip) - clone only
+    --level <1-9|1-19>          Compression level (default: algorithm-specific)
 
 Examples:
     $0 clone raspios-backup.img
+    $0 clone raspios-backup.img.zst --compress zstd --level 3
+    $0 clone raspios-backup.img.xz --compress xz --level 6
+    $0 clone raspios-backup.img.gz --compress gzip --level 9
     $0 clone ~/Images/my-raspberrypi.img --verbose
     $0 write raspios-backup.img
+    $0 write raspios-backup.img.zst
 
 Notes:
     - The tool scans external/removable devices for Raspberry Pi SD cards
     - Detection uses multiple indicators (cmdline.txt, config.txt, start.elf, overlays/)
     - You will be prompted to select the SD card device
+    - Compression requires: zstd, xz, or gzip installed on system
+    - Write automatically detects and decompresses .zst/.xz/.gz files
     - dd operations are destructive for 'write' – double confirmation required
 
 EOF
@@ -62,6 +70,8 @@ EOF
 SUBCOMMAND=""
 PATH_ARG=""
 VERBOSE=0
+COMPRESS_ALGO=""
+COMPRESS_LEVEL=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -71,6 +81,14 @@ while [[ $# -gt 0 ]]; do
         -v|--verbose)
             VERBOSE=1
             shift
+            ;;
+        --compress)
+            COMPRESS_ALGO="$2"
+            shift 2
+            ;;
+        --level)
+            COMPRESS_LEVEL="$2"
+            shift 2
             ;;
         clone|write)
             if [[ -z "$SUBCOMMAND" ]]; then
@@ -537,11 +555,81 @@ get_user_confirmation() {
     return 0
 }
 
+# Function to validate compression tool availability
+# Returns: 0 if available, 1 if not
+check_compression_tool() {
+    local algo=$1
+    
+    case "$algo" in
+        zstd)
+            if ! command -v zstd &>/dev/null; then
+                log_error "zstd not found. Install it with: brew install zstd"
+                return 1
+            fi
+            ;;
+        xz)
+            if ! command -v xz &>/dev/null; then
+                log_error "xz not found. Install it with: brew install xz"
+                return 1
+            fi
+            ;;
+        gzip)
+            if ! command -v gzip &>/dev/null; then
+                log_error "gzip not found (should be pre-installed on macOS)"
+                return 1
+            fi
+            ;;
+        *)
+            log_error "Unknown compression algorithm: $algo"
+            log_error "Supported: zstd, xz, gzip"
+            return 1
+            ;;
+    esac
+    
+    return 0
+}
+
+# Function to build compression command with level
+# Returns: compression command string
+build_compression_cmd() {
+    local algo=$1
+    local level=$2
+    
+    local cmd=""
+    case "$algo" in
+        zstd)
+            if [[ -n "$level" ]]; then
+                cmd="zstd -$level -T0"
+            else
+                cmd="zstd -3 -T0"  # Default level 3, multithreaded
+            fi
+            ;;
+        xz)
+            if [[ -n "$level" ]]; then
+                cmd="xz -$level -T0"
+            else
+                cmd="xz -6 -T0"  # Default level 6, multithreaded
+            fi
+            ;;
+        gzip)
+            if [[ -n "$level" ]]; then
+                cmd="gzip -$level"
+            else
+                cmd="gzip -6"  # Default level 6
+            fi
+            ;;
+    esac
+    
+    echo "$cmd"
+}
+
 # Function to perform the clone operation
 # Returns: 0 if successful, 1 if failed
 perform_clone() {
     local device=$1
     local output_image=$2
+    local compress_algo=$3
+    local compress_level=$4
     
     # Get raw device path (rdisk instead of disk for faster operation)
     local raw_device=$(echo "$device" | sed 's|/dev/disk|/dev/rdisk|')
@@ -560,14 +648,28 @@ perform_clone() {
     log_info "Press Ctrl+T to see progress during cloning (macOS feature)"
     log_info "Starting 'dd' operation (requires sudo)..."
     log_info "Using optimized block size: 16MB for maximum throughput"
-    echo ""
     
-    # Use 16MB block size for optimal throughput on macOS
-    # rdisk (raw disk) bypasses system buffering for faster I/O
-    if ! sudo dd if="$raw_device" of="$output_image" bs=16m status=progress 2>&1; then
-        log_error "Clone operation failed"
-        rm -f "$output_image" 2>/dev/null
-        return 1
+    # If compression requested, pipe through compressor
+    if [[ -n "$compress_algo" ]]; then
+        local compress_cmd=$(build_compression_cmd "$compress_algo" "$compress_level")
+        log_info "Compression: $compress_cmd"
+        echo ""
+        
+        if ! sudo dd if="$raw_device" bs=16m status=progress 2>&1 | $compress_cmd > "$output_image"; then
+            log_error "Clone operation failed"
+            rm -f "$output_image" 2>/dev/null
+            return 1
+        fi
+    else
+        echo ""
+        
+        # Use 16MB block size for optimal throughput on macOS
+        # rdisk (raw disk) bypasses system buffering for faster I/O
+        if ! sudo dd if="$raw_device" of="$output_image" bs=16m status=progress 2>&1; then
+            log_error "Clone operation failed"
+            rm -f "$output_image" 2>/dev/null
+            return 1
+        fi
     fi
     
     # Sync to ensure all data is written
@@ -689,6 +791,50 @@ get_user_confirmation_write() {
     return 0
 }
 
+# Function to detect and decompress input if needed
+# Returns: decompressed file path (or original if not compressed)
+handle_compressed_input() {
+    local image_path=$1
+    
+    # Detect compression by extension
+    case "$image_path" in
+        *.zst)
+            if ! command -v zstd &>/dev/null; then
+                log_error "Input is zstd-compressed but zstd not found"
+                log_error "Install with: brew install zstd"
+                return 1
+            fi
+            log_info "Detected zstd-compressed input, will decompress on-the-fly"
+            echo "zstd -dc"
+            return 0
+            ;;
+        *.xz)
+            if ! command -v xz &>/dev/null; then
+                log_error "Input is xz-compressed but xz not found"
+                log_error "Install with: brew install xz"
+                return 1
+            fi
+            log_info "Detected xz-compressed input, will decompress on-the-fly"
+            echo "xz -dc"
+            return 0
+            ;;
+        *.gz)
+            if ! command -v gzip &>/dev/null; then
+                log_error "Input is gzip-compressed but gzip not found"
+                return 1
+            fi
+            log_info "Detected gzip-compressed input, will decompress on-the-fly"
+            echo "gzip -dc"
+            return 0
+            ;;
+        *)
+            # Not compressed
+            echo ""
+            return 0
+            ;;
+    esac
+}
+
 # Perform write: image -> device
 perform_write() {
     local image_path=$1
@@ -700,6 +846,12 @@ perform_write() {
     fi
 
     local raw_device=$(echo "$device" | sed 's|/dev/disk|/dev/rdisk|')
+    
+    # Check if input is compressed
+    local decompress_cmd=$(handle_compressed_input "$image_path")
+    if [[ $? -ne 0 ]]; then
+        return 1
+    fi
 
     echo ""
     log_info "Starting write operation..."
@@ -715,9 +867,18 @@ perform_write() {
     log_info "Using optimized block size: 16MB for maximum throughput"
     echo ""
 
-    if ! sudo dd if="$image_path" of="$raw_device" bs=16m status=progress 2>&1; then
-        log_error "Write operation failed"
-        return 1
+    # Write with or without decompression
+    if [[ -n "$decompress_cmd" ]]; then
+        log_info "Decompressing and writing..."
+        if ! $decompress_cmd "$image_path" | sudo dd of="$raw_device" bs=16m status=progress 2>&1; then
+            log_error "Write operation failed"
+            return 1
+        fi
+    else
+        if ! sudo dd if="$image_path" of="$raw_device" bs=16m status=progress 2>&1; then
+            log_error "Write operation failed"
+            return 1
+        fi
     fi
 
     diskutil mountDisk "$device" > /dev/null 2>&1 || true
@@ -779,12 +940,46 @@ case "$SUBCOMMAND" in
             exit 1
         fi
         ESTIMATED_TIME=$(estimate_clone_time $DEVICE_SIZE_BYTES)
+        # Validate compression settings if specified
+        if [[ -n "$COMPRESS_ALGO" ]]; then
+            log_debug "Validating compression tool: $COMPRESS_ALGO"
+            if ! check_compression_tool "$COMPRESS_ALGO"; then
+                exit 1
+            fi
+            
+            # Validate compression level if specified
+            if [[ -n "$COMPRESS_LEVEL" ]]; then
+                if ! [[ "$COMPRESS_LEVEL" =~ ^[0-9]+$ ]]; then
+                    log_error "Invalid compression level: $COMPRESS_LEVEL (must be numeric)"
+                    exit 1
+                fi
+                
+                # Check level bounds based on algorithm
+                case "$COMPRESS_ALGO" in
+                    zstd)
+                        if [[ $COMPRESS_LEVEL -lt 1 ]] || [[ $COMPRESS_LEVEL -gt 19 ]]; then
+                            log_error "zstd level must be 1-19"
+                            exit 1
+                        fi
+                        ;;
+                    xz|gzip)
+                        if [[ $COMPRESS_LEVEL -lt 1 ]] || [[ $COMPRESS_LEVEL -gt 9 ]]; then
+                            log_error "$COMPRESS_ALGO level must be 1-9"
+                            exit 1
+                        fi
+                        ;;
+                esac
+            fi
+            
+            log_info "Compression enabled: $COMPRESS_ALGO (level: ${COMPRESS_LEVEL:-default})"
+        fi
+        
         log_debug "Getting user confirmation..."
         if ! get_user_confirmation "$SELECTED_DEVICE" "$SELECTED_NAME" "$SELECTED_SIZE" "$ESTIMATED_TIME"; then
             exit 0
         fi
         log_debug "Starting clone operation..."
-        if ! perform_clone "$SELECTED_DEVICE" "$OUTPUT_IMAGE"; then
+        if ! perform_clone "$SELECTED_DEVICE" "$OUTPUT_IMAGE" "$COMPRESS_ALGO" "$COMPRESS_LEVEL"; then
             exit 1
         fi
         log_debug "Verifying cloned image..."

@@ -10,6 +10,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install all required tools for partition manipulation and filesystem operations
 # In Ubuntu 24.04, fdisk is in the fdisk package (separate from util-linux)
+# Compression tools: zstd, xz-utils (gzip is pre-installed)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     fdisk \
     util-linux \
@@ -17,6 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     e2fsprogs \
     dosfstools \
     rsync \
+    zstd \
+    xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Add common binary paths to PATH

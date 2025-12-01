@@ -114,6 +114,107 @@ if [[ ! -f "$IMAGE_PATH" ]]; then
     exit 1
 fi
 
+# Variables for compressed input handling
+TEMP_IMAGE=""
+ORIGINAL_IMAGE="$IMAGE_PATH"
+
+# Function to check if a compression tool is available
+# Parameters:
+#   $1 - tool name (zstd, xz, gzip)
+# Returns: 0 if available, 1 if not
+check_decompression_tool() {
+    local tool="$1"
+    
+    if ! command -v "$tool" &> /dev/null; then
+        log_error "Decompression tool '$tool' is not installed"
+        log_error "Please install it:"
+        case "$tool" in
+            zstd)
+                log_error "  macOS: brew install zstd"
+                ;;
+            xz)
+                log_error "  macOS: brew install xz"
+                ;;
+            gzip)
+                log_error "  gzip should be pre-installed on macOS"
+                ;;
+        esac
+        return 1
+    fi
+    return 0
+}
+
+# Function to decompress input image if needed
+# Detects compressed files by extension and decompresses to a temporary file
+# Updates IMAGE_PATH to point to the decompressed file
+# Returns: 0 on success, 1 on failure
+handle_compressed_input() {
+    case "$IMAGE_PATH" in
+        *.zst)
+            log_info "Detected zstd compressed image"
+            check_decompression_tool "zstd" || return 1
+            
+            TEMP_IMAGE="${IMAGE_PATH}.decompressed.tmp"
+            log_info "Decompressing to: $TEMP_IMAGE"
+            
+            if ! zstd -dc "$IMAGE_PATH" > "$TEMP_IMAGE"; then
+                log_error "Failed to decompress zstd image"
+                return 1
+            fi
+            
+            IMAGE_PATH="$TEMP_IMAGE"
+            log_info "Decompression complete"
+            ;;
+        *.xz)
+            log_info "Detected xz compressed image"
+            check_decompression_tool "xz" || return 1
+            
+            TEMP_IMAGE="${IMAGE_PATH}.decompressed.tmp"
+            log_info "Decompressing to: $TEMP_IMAGE"
+            
+            if ! xz -dc "$IMAGE_PATH" > "$TEMP_IMAGE"; then
+                log_error "Failed to decompress xz image"
+                return 1
+            fi
+            
+            IMAGE_PATH="$TEMP_IMAGE"
+            log_info "Decompression complete"
+            ;;
+        *.gz)
+            log_info "Detected gzip compressed image"
+            check_decompression_tool "gzip" || return 1
+            
+            TEMP_IMAGE="${IMAGE_PATH}.decompressed.tmp"
+            log_info "Decompressing to: $TEMP_IMAGE"
+            
+            if ! gzip -dc "$IMAGE_PATH" > "$TEMP_IMAGE"; then
+                log_error "Failed to decompress gzip image"
+                return 1
+            fi
+            
+            IMAGE_PATH="$TEMP_IMAGE"
+            log_info "Decompression complete"
+            ;;
+    esac
+    return 0
+}
+
+# Cleanup function to remove temporary files
+cleanup() {
+    if [[ -n "$TEMP_IMAGE" ]] && [[ -f "$TEMP_IMAGE" ]]; then
+        log_info "Cleaning up temporary decompressed file"
+        rm -f "$TEMP_IMAGE"
+    fi
+}
+
+# Set up cleanup trap
+trap cleanup EXIT
+
+# Handle compressed input
+if ! handle_compressed_input; then
+    exit 1
+fi
+
 # Function to resize Raspberry Pi image
 # Parameters:
 #   $1 - Image path
