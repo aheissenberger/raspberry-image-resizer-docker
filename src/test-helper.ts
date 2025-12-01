@@ -73,10 +73,8 @@ function findFilesRecursiveSync(dir: string, files: string[] = []): string[] {
 async function createSnapshot(mountPoint: string, outputFile: string): Promise<void> {
   log(`Recording snapshot: ${outputFile}`);
   
-  // Find all files
   const files = findFilesRecursiveSync(mountPoint);
   
-  // Compute checksums for each file using Bun's crypto
   const checksums: string[] = [];
   for (const file of files) {
     try {
@@ -86,7 +84,6 @@ async function createSnapshot(mountPoint: string, outputFile: string): Promise<v
       hasher.update(new Uint8Array(buffer));
       const checksum = hasher.digest("hex");
       
-      // Get relative path
       const relativePath = file.replace(`${mountPoint}/`, "");
       checksums.push(`${checksum}  ${relativePath}`);
     } catch {
@@ -94,7 +91,6 @@ async function createSnapshot(mountPoint: string, outputFile: string): Promise<v
     }
   }
   
-  // Sort and write
   checksums.sort();
   await Bun.write(`/work/${outputFile}`, checksums.join("\n") + "\n");
 }
@@ -118,7 +114,6 @@ async function main(): Promise<void> {
 
   log(`Configuration: ${JSON.stringify(config, null, 2)}`);
 
-  // Remove existing image
   try {
     if (existsSync(imagePath)) {
       log(`Removing existing image ${config.imageFile}`);
@@ -128,7 +123,6 @@ async function main(): Promise<void> {
     // Ignore if file doesn't exist
   }
 
-  // Create blank image
   log(`Creating blank image ${config.initialImageMB}MB...`);
   await run([
     "dd",
@@ -139,7 +133,6 @@ async function main(): Promise<void> {
     "status=none",
   ]);
 
-  // Attach loop device
   const loopResult = await run(["losetup", "-f", "--show", imagePath]);
   if (!loopResult.success) {
     throw new Error(`Failed to attach loop device: ${loopResult.output}`);
@@ -148,7 +141,6 @@ async function main(): Promise<void> {
   log(`Loop device (initial): ${loopDevice}`);
 
   try {
-    // Calculate sectors
     const sectorsTotal = (config.initialImageMB * 1024 * 1024) / 512;
     const bootSizeSectors = (config.initialBootMB * 1024 * 1024) / 512;
     const freeTailSectors = (config.freeTailMB * 1024 * 1024) / 512;
@@ -158,7 +150,6 @@ async function main(): Promise<void> {
     const rootEnd = sectorsTotal - 1 - freeTailSectors;
     const rootSizeSectors = rootEnd - rootStart + 1;
 
-    // Write partition table
     if (config.freeTailMB > 0) {
       log(
         `Writing initial partition table (boot ${config.initialBootMB}MB, root rest, free tail ${config.freeTailMB}MB)...`
@@ -178,7 +169,6 @@ ${loopDevice}p2 : start=${rootStart}, size=${rootSizeSectors}, type=83
 
     await Bun.write("/tmp/layout.sfdisk", sfdiskLayout);
 
-    // Run sfdisk with stdin - use Bun.spawn with stdin as string
     const layoutContent = await Bun.file("/tmp/layout.sfdisk").text();
     const sfdiskProc = Bun.spawn(["sfdisk", loopDevice], {
       stdin: "pipe",
@@ -186,20 +176,17 @@ ${loopDevice}p2 : start=${rootStart}, size=${rootSizeSectors}, type=83
       stderr: "pipe",
     });
 
-    // Write to stdin using Bun's FileSink write method
     sfdiskProc.stdin.write(layoutContent);
     sfdiskProc.stdin.end();
     await sfdiskProc.exited;
 
     await run(["sync"]);
 
-    // Detach and reattach with partition scan
     await run(["losetup", "-d", loopDevice]);
     const loopResult2 = await run(["losetup", "-f", "--show", "-P", imagePath]);
     const loopDevice2 = loopResult2.output.trim();
     log(`Loop device reattached: ${loopDevice2}`);
 
-    // Create kpartx mappings
     log("Creating kpartx mappings for partitions...");
     await run(["kpartx", "-av", loopDevice2]);
     await Bun.sleep(1000);
@@ -208,19 +195,16 @@ ${loopDevice}p2 : start=${rootStart}, size=${rootSizeSectors}, type=83
     const bootPart = `/dev/mapper/${loopBasename}p1`;
     const rootPart = `/dev/mapper/${loopBasename}p2`;
 
-    // Check partitions exist
     if (!existsSync(bootPart) || !existsSync(rootPart)) {
       log("Partition mapper devices not found; listing /dev/mapper:");
       await run(["ls", "-l", "/dev/mapper"]);
       throw new Error("Partition devices not found");
     }
 
-    // Format partitions
     log("Formatting boot (FAT32) and root (ext4)...");
     await run(["mkfs.vfat", "-F32", bootPart]);
     await run(["mkfs.ext4", "-F", rootPart]);
 
-    // Populate boot partition
     log("Populating boot partition with sample files...");
     await run(["mkdir", "-p", "/mnt/boot"]);
     await run(["mount", bootPart, "/mnt/boot"]);
@@ -260,14 +244,12 @@ ${loopDevice}p2 : start=${rootStart}, size=${rootSizeSectors}, type=83
       await run(["umount", "/mnt/boot"]);
     }
 
-    // Populate root filesystem
     log("Populating root filesystem with sample data...");
     await run(["mkdir", "-p", "/mnt/root"]);
     await run(["mount", rootPart, "/mnt/root"]);
 
     try {
       await run(["mkdir", "-p", "/mnt/root/var/log", "/mnt/root/usr/lib"]);
-      // Create ~150MB of data
       for (let i = 1; i <= 15; i++) {
         await run([
           "dd",
@@ -287,7 +269,6 @@ ${loopDevice}p2 : start=${rootStart}, size=${rootSizeSectors}, type=83
       await run(["umount", "/mnt/root"]);
     }
 
-    // Show initial layout
     log("Initial layout:");
     const fdiskResult = await run(["fdisk", "-l", loopDevice2]);
     if (config.verbose) {
@@ -298,12 +279,10 @@ ${loopDevice}p2 : start=${rootStart}, size=${rootSizeSectors}, type=83
     await run(["sync"]);
     await Bun.sleep(1000);
 
-    // Detach loop device and remove kpartx mappings before worker runs
     log("Detaching loop device before worker...");
     await run(["kpartx", "-d", loopDevice2]);
     await run(["losetup", "-d", loopDevice2]);
 
-    // Setup environment for worker
     process.env.IMAGE_FILE = config.imageFile;
     process.env.BOOT_SIZE_MB = config.bootSizeMB.toString();
     process.env.VERBOSE = config.verbose ? "1" : "0";
@@ -319,7 +298,6 @@ ${loopDevice}p2 : start=${rootStart}, size=${rootSizeSectors}, type=83
       );
     }
 
-    // Run the worker
     const workerResult = await run([
       "bun",
       "/usr/local/bin/resize-worker.js",
@@ -330,7 +308,6 @@ ${loopDevice}p2 : start=${rootStart}, size=${rootSizeSectors}, type=83
       process.exit(1);
     }
 
-    // Re-attach for post-resize snapshot
     log("Re-attaching image for post-resize snapshot...");
     const postLoopResult = await run([
       "losetup",
@@ -349,14 +326,12 @@ ${loopDevice}p2 : start=${rootStart}, size=${rootSizeSectors}, type=83
     const postRoot = `/dev/mapper/${postLoopBasename}p2`;
     const postBoot = `/dev/mapper/${postLoopBasename}p1`;
 
-    // Show post layout
     const postFdiskResult = await run(["fdisk", "-l", postLoop]);
     if (config.verbose) {
       console.log(postFdiskResult.output);
     }
     await run(["blkid", postBoot, postRoot]);
 
-    // Create post snapshots
     if (config.snapshot) {
       if (existsSync(postRoot)) {
         log("Recording post-resize root snapshot (sha256 list)");
@@ -379,7 +354,6 @@ ${loopDevice}p2 : start=${rootStart}, size=${rootSizeSectors}, type=83
       }
     }
 
-    // Cleanup
     log("Cleaning post snapshot loop/mappings...");
     await run(["kpartx", "-d", postLoop]);
     await run(["losetup", "-d", postLoop]);
@@ -392,7 +366,6 @@ ${loopDevice}p2 : start=${rootStart}, size=${rootSizeSectors}, type=83
     if (errorStack) {
       console.error(errorStack);
     }
-    // Cleanup on error
     await run(["kpartx", "-d", loopDevice], { allowFail: true });
     await run(["losetup", "-d", loopDevice], { allowFail: true });
     process.exit(1);

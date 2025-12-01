@@ -3,7 +3,7 @@
  */
 
 import { spawn } from "bun";
-import { existsSync, unlinkSync } from "fs";
+import { unlinkSync } from "fs";
 
 export interface TestImageConfig {
   filename: string;
@@ -129,7 +129,9 @@ export async function compareSnapshots(
   preFile: string,
   postFile: string
 ): Promise<boolean> {
-  if (!existsSync(preFile) || !existsSync(postFile)) {
+  const preExists = await Bun.file(preFile).exists();
+  const postExists = await Bun.file(postFile).exists();
+  if (!preExists || !postExists) {
     return false;
   }
 
@@ -160,7 +162,7 @@ export async function validateSnapshots(
 /**
  * Clean up snapshot files
  */
-export function cleanupSnapshots(snapshots: SnapshotFiles): void {
+export async function cleanupSnapshots(snapshots: SnapshotFiles): Promise<void> {
   const files = [
     snapshots.rootPre,
     snapshots.rootPost,
@@ -169,7 +171,7 @@ export function cleanupSnapshots(snapshots: SnapshotFiles): void {
   ];
 
   for (const file of files) {
-    if (existsSync(file)) {
+    if (await Bun.file(file).exists()) {
       unlinkSync(file);
     }
   }
@@ -178,13 +180,13 @@ export function cleanupSnapshots(snapshots: SnapshotFiles): void {
 /**
  * Clean up test image files
  */
-export function cleanupTestImages(patterns: string[]): void {
+export async function cleanupTestImages(patterns: string[]): Promise<void> {
   for (const pattern of patterns) {
     const files = Array.from(
       new Bun.Glob(pattern).scanSync({ cwd: process.cwd(), absolute: true })
     );
     for (const file of files) {
-      if (existsSync(file)) {
+      if (await Bun.file(file).exists()) {
         unlinkSync(file);
       }
     }
@@ -259,11 +261,11 @@ export async function compressFile(
 /**
  * Get file size in bytes
  */
-export function getFileSize(filepath: string): number {
-  if (!existsSync(filepath)) {
+export async function getFileSize(filepath: string): Promise<number> {
+  const file = Bun.file(filepath);
+  if (!(await file.exists())) {
     return -1;
   }
-  const file = Bun.file(filepath);
   return file.size;
 }
 
@@ -281,12 +283,12 @@ export function calculateCompressionRatio(
  * Compute MD5 checksum of a file
  */
 export async function computeChecksum(filepath: string): Promise<string> {
-  if (!existsSync(filepath)) {
+  const file = Bun.file(filepath);
+  if (!(await file.exists())) {
     return "FILE_NOT_FOUND";
   }
 
   const hasher = new Bun.CryptoHasher("md5");
-  const file = Bun.file(filepath);
   hasher.update(await file.arrayBuffer());
   return hasher.digest("hex");
 }

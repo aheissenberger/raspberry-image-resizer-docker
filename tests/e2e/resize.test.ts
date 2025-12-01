@@ -4,6 +4,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { join } from "path";
 import {
   buildDockerImage,
   runDockerTest,
@@ -14,7 +15,6 @@ import {
   dockerImageExists,
   type SnapshotFiles,
 } from "./helpers";
-import { join } from "path";
 
 const IMAGE_TAG = "rpi-resizer-slim";
 const TEST_TIMEOUT = 300000; // 5 minutes per test
@@ -40,10 +40,10 @@ describe("Image Resize E2E Tests", () => {
     }
   }, TEST_TIMEOUT);
 
-  afterAll(() => {
+  afterAll(async () => {
     // Clean up all test images
     console.log("\n[E2E] Cleaning up test images...");
-    cleanupTestImages([
+    await cleanupTestImages([
       "test.img",
       "test-expand.img",
       "test-shrink.img",
@@ -97,7 +97,7 @@ describe("Image Resize E2E Tests", () => {
       );
 
       // Cleanup snapshots
-      cleanupSnapshots(snapshots);
+      await cleanupSnapshots(snapshots);
 
       console.log("[E2E] Test 1: PASSED\n");
     },
@@ -148,7 +148,7 @@ describe("Image Resize E2E Tests", () => {
       );
 
       // Cleanup snapshots
-      cleanupSnapshots(snapshots);
+      await cleanupSnapshots(snapshots);
 
       console.log("[E2E] Test 2: PASSED\n");
     },
@@ -200,7 +200,7 @@ describe("Image Resize E2E Tests", () => {
       );
 
       // Cleanup snapshots
-      cleanupSnapshots(snapshots);
+      await cleanupSnapshots(snapshots);
 
       console.log("[E2E] Test 3: PASSED\n");
     },

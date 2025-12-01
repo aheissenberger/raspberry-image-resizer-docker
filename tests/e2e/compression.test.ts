@@ -4,7 +4,6 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { existsSync } from "fs";
 import { join } from "path";
 import { spawn } from "bun";
 import {
@@ -64,7 +63,7 @@ describe("Compression Workflow E2E Tests", () => {
     }
 
     // Check CLI executable exists
-    if (!existsSync(CLI_PATH)) {
+    if (!(await Bun.file(CLI_PATH).exists())) {
       throw new Error(
         `CLI executable not found at ${CLI_PATH}. Please build it first with: bun run build:cli`
       );
@@ -73,10 +72,10 @@ describe("Compression Workflow E2E Tests", () => {
     console.log("\n[E2E] Prerequisites verified\n");
   }, 30000);
 
-  afterAll(() => {
+  afterAll(async () => {
     // Clean up all test artifacts
     console.log("\n[E2E] Cleaning up compression test artifacts...");
-    cleanupTestImages([
+    await cleanupTestImages([
       "test-compression-*.img*",
       "test-compressed-*.img*",
       "test-detect.img.*",
@@ -171,7 +170,7 @@ describe("Compression Workflow E2E Tests", () => {
       console.log(`[E2E] Creating test image: ${sourceImg} (100MB)`);
       await createTestImage(sourceImg, 100);
 
-      const originalSize = getFileSize(sourceImg);
+      const originalSize = await getFileSize(sourceImg);
       expect(originalSize).toBeGreaterThan(0);
       console.log(
         `[E2E] Original image size: ${(originalSize / 1024 / 1024).toFixed(2)} MB`
@@ -181,7 +180,7 @@ describe("Compression Workflow E2E Tests", () => {
       console.log("[E2E] Compressing with zstd (level 3)...");
       await compressFile(sourceImg, compressedImg, "zstd", 3);
 
-      const compressedSize = getFileSize(compressedImg);
+      const compressedSize = await getFileSize(compressedImg);
       expect(compressedSize).toBeGreaterThan(0);
       expect(compressedSize).toBeLessThan(originalSize);
 
@@ -196,7 +195,7 @@ describe("Compression Workflow E2E Tests", () => {
       );
 
       // Clean up source
-      cleanupTestImages([sourceImg]);
+      await cleanupTestImages([sourceImg]);
     },
     TEST_TIMEOUT
   );
@@ -214,7 +213,7 @@ describe("Compression Workflow E2E Tests", () => {
       console.log(`[E2E] Creating test image: ${sourceImg} (100MB)`);
       await createTestImage(sourceImg, 100);
 
-      const originalSize = getFileSize(sourceImg);
+      const originalSize = await getFileSize(sourceImg);
       expect(originalSize).toBeGreaterThan(0);
       console.log(
         `[E2E] Original image size: ${(originalSize / 1024 / 1024).toFixed(2)} MB`
@@ -224,7 +223,7 @@ describe("Compression Workflow E2E Tests", () => {
       console.log("[E2E] Compressing with xz (level 6)...");
       await compressFile(sourceImg, compressedImg, "xz", 6);
 
-      const compressedSize = getFileSize(compressedImg);
+      const compressedSize = await getFileSize(compressedImg);
       expect(compressedSize).toBeGreaterThan(0);
       expect(compressedSize).toBeLessThan(originalSize);
 
@@ -239,7 +238,7 @@ describe("Compression Workflow E2E Tests", () => {
       );
 
       // Clean up source
-      cleanupTestImages([sourceImg]);
+      await cleanupTestImages([sourceImg]);
     },
     TEST_TIMEOUT
   );
@@ -257,7 +256,7 @@ describe("Compression Workflow E2E Tests", () => {
       console.log(`[E2E] Creating test image: ${sourceImg} (100MB)`);
       await createTestImage(sourceImg, 100);
 
-      const originalSize = getFileSize(sourceImg);
+      const originalSize = await getFileSize(sourceImg);
       expect(originalSize).toBeGreaterThan(0);
       console.log(
         `[E2E] Original image size: ${(originalSize / 1024 / 1024).toFixed(2)} MB`
@@ -267,7 +266,7 @@ describe("Compression Workflow E2E Tests", () => {
       console.log("[E2E] Compressing with gzip (level 6)...");
       await compressFile(sourceImg, compressedImg, "gzip", 6);
 
-      const compressedSize = getFileSize(compressedImg);
+      const compressedSize = await getFileSize(compressedImg);
       expect(compressedSize).toBeGreaterThan(0);
       expect(compressedSize).toBeLessThan(originalSize);
 
@@ -282,7 +281,7 @@ describe("Compression Workflow E2E Tests", () => {
       );
 
       // Clean up source
-      cleanupTestImages([sourceImg]);
+      await cleanupTestImages([sourceImg]);
     },
     TEST_TIMEOUT
   );
@@ -329,7 +328,7 @@ describe("Compression Workflow E2E Tests", () => {
       console.log("\n[E2E] PASSED: Decompression detection\n");
 
       // Cleanup
-      cleanupTestImages(["test-detect.img.*"]);
+      await cleanupTestImages(["test-detect.img.*"]);
     },
     TEST_TIMEOUT
   );
@@ -343,7 +342,7 @@ describe("Compression Workflow E2E Tests", () => {
 
       const compressedImg = "test-compressed-zstd.img.zst";
 
-      if (!existsSync(compressedImg)) {
+      if (!(await Bun.file(compressedImg).exists())) {
         console.log("[E2E] Compressed image not found, skipping test");
         return;
       }
