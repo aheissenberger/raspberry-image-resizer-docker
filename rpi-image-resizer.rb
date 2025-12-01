@@ -1,13 +1,13 @@
 class RpiImageResizer < Formula
   desc "Raspberry Pi image resize and partition adjuster (CLI)"
   homepage "https://github.com/aheissenberger/raspberry-image-resizer-docker"
-  version "0.0.2"
+  version "0.0.3"
 
   if Hardware::CPU.arm?
-    url "https://github.com/aheissenberger/raspberry-image-resizer-docker/releases/download/v0.0.2/rpi-tool-darwin-arm64.tar.gz"
-    sha256 "087846cfbfe18a6cd2bee7feaac1893ea19c99029fca1ec69bd3c3f6b00402ce"
+    url "https://github.com/aheissenberger/raspberry-image-resizer-docker/releases/download/v0.0.3/rpi-tool-darwin-arm64.tar.gz"
+    sha256 "11cc2c3e3b83935fac8045fd613a4e36161c98d514f6cecdd00607d546dcaf3c"
   else
-    url "https://github.com/aheissenberger/raspberry-image-resizer-docker/releases/download/v0.0.2/rpi-tool-darwin-amd64.tar.gz"
+    url "https://github.com/aheissenberger/raspberry-image-resizer-docker/releases/download/v0.0.3/rpi-tool-darwin-amd64.tar.gz"
     sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   end
 
