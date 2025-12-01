@@ -406,6 +406,31 @@ The clone command must:
 8. Verify the output image was created successfully
 9. Remount all mountable volumes of the source device upon completion
 
+**Clone progress and performance (implementation requirements):**
+
+- Use `dd` with continuous progress: `status=progress` must be enabled so users see byte counters while cloning. Progress is emitted on `stderr` and forwarded by the CLI in real time.
+- Prefer raw device nodes for speed on macOS: use `/dev/rdiskX` instead of `/dev/diskX` when invoking `dd`.
+- Recommended defaults: `bs=4m conv=sync,noerror` to handle read hiccups without aborting and to write efficiently in large chunks.
+- Example (uncompressed clone):
+  ```bash
+  dd if=/dev/rdisk2 of=./raspi.img bs=4m conv=sync,noerror status=progress
+  ```
+- Example (compressed clone with zstd, default level 3, all cores):
+  ```bash
+  dd if=/dev/rdisk2 bs=4m conv=sync,noerror status=progress | zstd -T0 -3 -o ./raspi.img.zst
+  ```
+- Example (compressed clone with xz, default level 6, all cores):
+  ```bash
+  dd if=/dev/rdisk2 bs=4m conv=sync,noerror status=progress | xz -T0 -6 > ./raspi.img.xz
+  ```
+- Example (compressed clone with gzip, default level 6, single-threaded):
+  ```bash
+  dd if=/dev/rdisk2 bs=4m conv=sync,noerror status=progress | gzip -6 > ./raspi.img.gz
+  ```
+- Tool validation: before cloning begins, the CLI must verify required compressors exist based on `--compress` selection and provide Homebrew install hints if missing.
+- Filename extension policy: enforce `.zst`, `.xz`, `.gz` to match the chosen algorithm; error if inconsistent.
+- Compression levels: validate allowable ranges (`zstd` 1–19, `xz` 1–9, `gzip` 1–9) and default accordingly when omitted.
+
 The write command must:
 
 1. Accept a path to an existing image file
@@ -415,6 +440,16 @@ The write command must:
 3. Display a numbered list of all compatible devices (no Pi-specific filtering)
 4. Allow interactive selection of the target device
 5. Require double confirmation before writing ("yes" and final "WRITE")
+
+**Write streaming and progress (implementation requirements):**
+
+- For compressed images, perform on-the-fly decompression piped directly into `dd` (no temporary file):
+  - zstd: `zstd -dc ./raspi.img.zst | dd of=/dev/rdiskX bs=4m status=progress`
+  - xz: `xz -dc ./raspi.img.xz | dd of=/dev/rdiskX bs=4m status=progress`
+  - gzip: `gzip -dc ./raspi.img.gz | dd of=/dev/rdiskX bs=4m status=progress`
+- For uncompressed images, write with: `dd if=./raspi.img of=/dev/rdiskX bs=4m status=progress`.
+- Progress visibility: ensure `dd` progress (on `stderr`) is streamed to the user continuously by the CLI.
+- Safety: retain the existing double-confirmation flow and re-scan/remount behavior after completion.
 ## 6. Risks & Limitations
 
 - Docker on macOS cannot access raw block devices (e.g., `/dev/disk2`) — only `.img` files.

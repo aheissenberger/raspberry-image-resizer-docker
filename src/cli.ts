@@ -63,6 +63,8 @@ async function main() {
 
     const raw = selected.replace("/dev/disk", "/dev/rdisk");
 
+    // Progress will be shown via dd's status=progress (or SIGINFO on macOS)
+
     // Optional compression
     let compressor: string[] | undefined;
     if (args.compress) {
@@ -74,13 +76,13 @@ async function main() {
     // Unmount volumes (best-effort)
     await exec.run(["diskutil", "unmountDisk", selected], { allowNonZeroExit: true });
 
-    // dd command
+    // dd command with progress only using dd capabilities
     if (compressor) {
-      // bash -lc to run a pipeline with sudo
-      const pipeCmd = `sudo dd if=${raw} bs=16m status=progress 2>/dev/stderr | ${compressor.join(" ")} > ${escapePath(output)}`;
-      await exec.run(["bash", "-lc", pipeCmd]);
+      const pipeCmd = `sudo dd if=${raw} bs=1m status=progress 2>/dev/stderr | ${compressor.join(" ")} > ${escapePath(output)}`;
+      await exec.run(["bash", "-lc", pipeCmd], { onStderrChunk: (s) => process.stderr.write(s) });
     } else {
-      await exec.run(["sudo", "dd", `if=${raw}`, `of=${output}`, "bs=16m", "status=progress"], {});
+      const cmd = `sudo dd if=${raw} of=${escapePath(output)} bs=1m status=progress`;
+      await exec.run(["bash", "-lc", cmd], { onStderrChunk: (s) => process.stderr.write(s) });
     }
 
     await exec.run(["sync"], { allowNonZeroExit: true });
@@ -111,11 +113,13 @@ async function main() {
 
     await exec.run(["diskutil", "unmountDisk", selected], { allowNonZeroExit: true });
 
+    // Progress for write using dd only
     if (decomp) {
-      const cmd = `${decomp.join(" ")} ${escapePath(image)} | sudo dd of=${raw} bs=16m status=progress 2>/dev/stderr`;
-      await exec.run(["bash", "-lc", cmd]);
+      const cmd = `${decomp.join(" ")} ${escapePath(image)} | sudo dd of=${raw} bs=1m status=progress 2>/dev/stderr`;
+      await exec.run(["bash", "-lc", cmd], { onStderrChunk: (s) => process.stderr.write(s) });
     } else {
-      await exec.run(["sudo", "dd", `if=${image}`, `of=${raw}`, "bs=16m", "status=progress"]);
+      const cmd = `sudo dd if=${escapePath(image)} of=${raw} bs=1m status=progress`;
+      await exec.run(["bash", "-lc", cmd], { onStderrChunk: (s) => process.stderr.write(s) });
     }
 
     await exec.run(["sync"], { allowNonZeroExit: true });
