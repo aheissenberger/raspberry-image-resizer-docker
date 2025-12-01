@@ -15,6 +15,7 @@ A **cross-platform, safe, reproducible** solution for resizing and modifying Ras
 - ✅ **Overall image resizing**: `--image-size` grows or shrinks the entire image file (MB/GB/TB)
 - ✅ **Partition moving**: Automatically moves partitions to make room for boot expansion
 - ✅ **File preservation**: Backs up and restores all boot files
+ - ✅ **Boot label preservation**: Retains existing FAT volume label when recreating boot filesystem (if present)
 - ✅ **Optional ext4 resize**: Opt-in support for manual root partition resizing
 - ✅ **Dry-run mode**: Preview changes before applying them
  - ✅ **Post-clone remount**: Automatically remounts mountable volumes of the SD card after cloning
@@ -350,6 +351,8 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 11. **File Restoration**: Restores backed-up boot files
 12. **Root Auto-Adjust** (when `--image-size` used): expands or shrinks root to fit the new image size
 13. **Cleanup**: Unmounts filesystems and detaches loop devices
+
+> Boot volume label: If the original boot filesystem has a label (e.g. `BOOT`), it is detected before formatting and reapplied during FAT32 recreation. If no label exists, none is set (behavior unchanged).
 
 ## Safety Features
 

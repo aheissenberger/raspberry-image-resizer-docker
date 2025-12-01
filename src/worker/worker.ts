@@ -85,6 +85,8 @@ async function run(exe: Executor) {
   INFO("Step 2: Examining partition layout...");
   let bootPart = `${loop}p1`;
   let rootPart = `${loop}p2`;
+  // Capture existing boot filesystem label (if any) for later preservation
+  let bootLabel = "";
   if (!DRY) {
     const hasP1 = existsSync(`${loop}p1`);
     if (!hasP1) {
@@ -96,6 +98,10 @@ async function run(exe: Executor) {
     if (!existsSync(bootPart) || !existsSync(rootPart)) {
       throw new Error(`Partition devices not found: ${bootPart}, ${rootPart}`);
     }
+    // Attempt to read volume label using blkid; ignore errors
+    const labelRes = await exe.run(["blkid", "-s", "LABEL", "-o", "value", bootPart], { allowNonZeroExit: true });
+    bootLabel = labelRes.code === 0 ? labelRes.stdout.trim() : "";
+    if (bootLabel) INFO(`Detected existing boot label: '${bootLabel}'`);
   }
 
   // Step 3: Backup boot files
@@ -234,8 +240,12 @@ async function run(exe: Executor) {
     const base = loop.split("/").pop()!;
     const mapperBoot = `/dev/mapper/${base}p1`;
     bootPart = existsSync(mapperBoot) ? mapperBoot : `${loop}p1`;
-
-    await exe.run(["mkfs.vfat", "-F", "32", bootPart]);
+    if (bootLabel) {
+      INFO(`Recreating FAT32 filesystem with preserved label '${bootLabel}'`);
+      await exe.run(["mkfs.vfat", "-F", "32", "-n", bootLabel, bootPart]);
+    } else {
+      await exe.run(["mkfs.vfat", "-F", "32", bootPart]);
+    }
   }
 
   // Step 8: Restore boot files
