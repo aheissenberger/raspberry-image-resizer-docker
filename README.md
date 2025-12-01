@@ -6,6 +6,7 @@ A **cross-platform, safe, reproducible** solution for resizing and modifying Ras
 
 - ✅ **SD Card Cloning**: Clone Raspberry Pi SD cards directly to image files
 - ✅ **SD Card Writing**: Write an image back to a Raspberry Pi SD card (with double confirmation)
+- ✅ **Device size query**: Print removable device capacity with `size` command
 - ✅ **Safe**: Creates timestamped backups before any modification
 - ✅ **Cross-platform**: Works on macOS (Intel & Apple Silicon) using Docker
 - ✅ **Reproducible**: Uses pinned Docker images for consistent results
@@ -104,6 +105,12 @@ bun run src/cli.ts resize path/to/raspios.img
 
 # Show version
 ./rpi-tool --version
+
+# Show removable device size (auto-detect)
+./rpi-tool size
+
+# Show size for a specific device
+./rpi-tool size --device /dev/disk4
 ```
 
 This will:
@@ -153,6 +160,11 @@ The combined Bun CLI handles cloning and writing, with optional compression supp
 **Write syntax:**
 ```bash
 ./rpi-tool write <image-path>
+```
+
+**Device size syntax:**
+```bash
+./rpi-tool size [--device </dev/diskN>]
 ```
 
 **Compression options:**
@@ -214,6 +226,7 @@ The combined Bun CLI handles cloning and writing, with optional compression supp
 **Notes:**
 - **Clone**: Only lists devices with Raspberry Pi indicators (`cmdline.txt`, `config.txt`, etc.) for safety
 - **Write**: Lists all removable devices ≤ 2TB (no Pi detection) - use with caution
+- **Write preflight**: Aborts if an uncompressed image is larger than the selected device. For compressed streams (.zst/.xz/.gz), exact preflight of the uncompressed size is not available.
 - **Compression**: Requires `zstd`, `xz`, or `gzip` installed (install via Homebrew: `brew install zstd xz`)
 - **Write decompression**: Automatically detects `.zst`, `.xz`, `.gz` extensions and decompresses on-the-fly
 - Requires sudo privileges for `dd` operation
@@ -266,6 +279,19 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 | `--work-dir <path>` | Working directory for temp files and working image | For compressed inputs: `$TMPDIR` or `/tmp`; otherwise source dir |
 | `-h`, `--help` | Show help message | - |
 
+> Note: Before setting a large `--image-size` (e.g., 64GB), first check your SD card's real capacity and pick a slightly smaller size to avoid short write errors.
+
+```bash
+# Auto-detect removable device size
+./rpi-tool size
+
+# Or specify a device explicitly
+./rpi-tool size --device /dev/disk4
+
+# Example: for a card reporting ~59.63 GiB, choose something like 62.9GB
+./rpi-tool resize raspios.img --image-size 62.9GB
+```
+
 ### Examples
 
 **Resize boot partition to 512MB:**
@@ -290,6 +316,8 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 ```bash
 ./rpi-tool resize raspios.img --image-size 64GB --boot-size 256
 ```
+
+> Tip: Before expanding to a nominal size (e.g., 64GB), check the card's real capacity with `./rpi-tool size` and choose a slightly smaller value to avoid short writes. For example, if the card reports around 59.63 GiB, use something like `--image-size 62.9GB`.
 
 **Shrink image (only if safe):**
 ```bash

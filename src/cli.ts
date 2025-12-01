@@ -15,8 +15,9 @@ function usage() {
   console.log(`raspberry-image-tool v${VERSION}\n\n` +
 `Usage:\n  rpi-tool <command> [options]\n\n` +
 `Commands:\n  version                    Print version\n  clone <output-image>       Clone SD to image (macOS)\n  write <image>              Write image to SD (macOS)\n  resize <image>             Resize and adjust partitions (Docker)\n  clean                      Remove Docker images\n\n` +
+  `  size                       Show size of removable device (macOS)\n\n` +
 `Global Options:\n  -h, --help                 Show help\n  -v, --version              Show version\n\n` +
-`Clone/Write Options:\n  --compress <zstd|xz|gzip>  Compress output during clone\n  --level <n>                Compression level\n  --block-size <SIZE>        dd block size (default 4m)\n  --device </dev/diskN>      Override auto-detect; use specific disk (advanced)\n  --yes                      Skip confirmations (write only; dangerous)\n  --preview                  Print the dd command and exit (no changes)\n\n` +
+  `Clone/Write/Size Options:\n  --compress <zstd|xz|gzip>  Compress output during clone\n  --level <n>                Compression level\n  --block-size <SIZE>        dd block size (default 4m)\n  --device </dev/diskN>      Override auto-detect; use specific disk (advanced)\n  --yes                      Skip confirmations (write only; dangerous)\n  --preview                  Print the dd command and exit (no changes)\n\n` +
 `Resize Options:\n  --boot-size <MB>           Target boot partition size (default 256)\n  --image-size <SIZE>        Change overall image size (e.g. 32GB, 8192MB)\n  --unsafe-resize-ext4       Run resize2fs on root when not moving (unsafe)\n  --dry-run                  Plan only, do not modify\n  --verbose                  Verbose logs\n  --docker-image <name>      Docker image name (default rpi-image-resizer:latest)\n  --work-dir <path>          Working directory for temp files (default: TMPDIR or /tmp for compressed)\n`);
 }
 
@@ -33,6 +34,24 @@ function resolveBlockSize(input?: string) {
     console.error(`Invalid --block-size '${input}', falling back to ${def}`);
   }
   return v;
+}
+
+function bytesToGiB(n: number): string {
+  return `${(n / (1024 ** 3)).toFixed(2)} GiB`;
+}
+
+async function getDiskSizeBytes(exec: BunExecutor, disk: string): Promise<number> {
+  // disk should be like /dev/diskX (NOT rdisk)
+  const cmd = `diskutil info -plist ${disk} | plutil -convert json -o - -`;
+  const res = await exec.run(["bash", "-lc", cmd]);
+  if (res.code !== 0) throw new Error(`Failed to query disk info for ${disk}`);
+  try {
+    const info = JSON.parse(res.stdout);
+    // Prefer TotalSize, fall back to MediaSize or Size
+    return Number(info.TotalSize ?? info.MediaSize ?? info.Size ?? 0);
+  } catch {
+    throw new Error(`Unable to parse disk info JSON for ${disk}`);
+  }
 }
 
 async function main() {
@@ -95,56 +114,68 @@ async function main() {
     return;
   }
 
+  if (command === "size") {
+    const { args } = parseArgs(rest, [
+      { name: "device", type: "string" }
+    ]);
+    const selected = args.device ? normalizeDevice(String(args.device)).disk : await detectRemovableDisk(exec);
+    if (!selected) throw new Error("No removable device detected");
+    const sizeBytes = await getDiskSizeBytes(exec, selected);
+    console.log(`${selected}: ${bytesToGiB(sizeBytes)} (${sizeBytes} bytes)`);
+    return;
+  }
+
   if (command === "write") {
-    const { args: _args, positional } = parseArgs(rest, [
-      { name: "block-size", type: "string" },
-      { name: "device", type: "string" },
-      { name: "yes", type: "boolean" },
-      { name: "preview", type: "boolean" }
+    const { args, positional } = parseArgs(rest, [
+      { name: "device", type: "string" } // optional explicit device: /dev/diskN
     ]);
     const image = positional[0];
     if (!image) throw new Error("Missing <image>");
-    const bs = resolveBlockSize(_args["block-size"] as string | undefined);
 
     // choose target device
-    const selected = _args.device ? normalizeDevice(String(_args.device)).disk : await detectRemovableDisk(exec);
-    if (!selected) throw new Error("No removable device detected for write");
-    const raw = _args.device ? normalizeDevice(String(_args.device)).rdisk : selected.replace("/dev/disk", "/dev/rdisk");
-
-    // Double confirmation for destructive write (unless --yes)
-    if (!_args.yes) {
-      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-      const ask = (q: string) => new Promise<string>((resolve) => rl.question(q, (ans) => resolve(ans.trim())));
-      console.warn(`About to WRITE image to device: ${selected} (raw ${raw})`);
-      const ans1 = await ask("Are you sure you want to proceed? Type 'yes' to continue: ");
-      if (ans1.toLowerCase() !== "yes") {
-        rl.close();
-        console.error("Aborted by user.");
-        return;
+    let selected: string | undefined = (args.device as string | undefined);
+    if (!selected) {
+      const disks = (await exec.run(["bash", "-lc", "diskutil list | grep -E '^/dev/disk[0-9]+' | awk '{print $1}'"]))
+        .stdout.trim().split(/\s+/).filter(Boolean);
+      for (const d of disks) {
+        const info = await exec.run(["bash", "-lc", `diskutil info ${d} | grep 'Removable Media:' | grep -q Removable && echo yes || echo no`]);
+        if (info.stdout.trim() === "yes") { selected = d; break; }
       }
-      const ans2 = await ask("Final confirmation: type 'WRITE' to proceed: ");
-      rl.close();
-      if (ans2 !== "WRITE") {
-        console.error("Aborted by user.");
-        return;
-      }
-    } else {
-      console.warn("--yes provided: skipping interactive confirmations (dangerous).");
     }
+    if (!selected) throw new Error("No removable device detected for write");
+    const raw = selected.replace("/dev/disk", "/dev/rdisk");
 
     // detect decompressor
     const algo = detectCompressionByExt(image);
     const decomp = algo ? buildDecompressor(algo) : undefined;
 
-    // Build dd command and optionally preview
-    const ddCmdW = buildWriteDdCommand({ rawDevice: raw, imagePath: escapePath(image), blockSize: bs, decompressor: decomp });
-    if (_args.preview) {
-      console.log(ddCmdW);
-      return;
+    // Preflight: if image is uncompressed, ensure device capacity >= image size
+    if (!decomp) {
+      const imgSize = Bun.file(image).size;
+      const devSize = await getDiskSizeBytes(exec, selected);
+      if (imgSize > devSize) {
+        throw new Error(
+          `Image (${bytesToGiB(imgSize)}) is larger than device ${selected} (${bytesToGiB(devSize)}). ` +
+          `Use 'rpi-tool resize --image-size <smaller size>' to shrink the image or choose a larger device.`
+        );
+      }
+    } else {
+      // Optional: warn we cannot preflight exact size for compressed streams
+      console.error("Note: writing from compressed stream; exact uncompressed size preflight is not available.");
     }
 
+    // Unmount volumes (best-effort)
     await exec.run(["diskutil", "unmountDisk", selected], { allowNonZeroExit: true });
-    await exec.run(["bash", "-lc", ddCmdW], { onStderrChunk: (s) => process.stderr.write(s) });
+
+    // dd command with conv=fsync to flush writes
+    if (decomp) {
+      const cmd = `${decomp.join(" ")} ${escapePath(image)} | sudo dd of=${raw} bs=4m conv=fsync status=progress 2>/dev/stderr`;
+      console.log(`About to WRITE image to device: ${selected} (raw ${raw})`);
+      await exec.run(["bash", "-lc", cmd]);
+    } else {
+      console.log(`About to WRITE image to device: ${selected} (raw ${raw})`);
+      await exec.run(["bash", "-lc", `sudo dd if=${escapePath(image)} of=${raw} bs=4m conv=fsync status=progress 2>/dev/stderr`]);
+    }
 
     await exec.run(["sync"], { allowNonZeroExit: true });
     await exec.run(["diskutil", "mountDisk", selected], { allowNonZeroExit: true });
