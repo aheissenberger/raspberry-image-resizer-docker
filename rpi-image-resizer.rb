@@ -5,7 +5,7 @@ class RpiImageResizer < Formula
 
   if Hardware::CPU.arm?
     url "https://github.com/aheissenberger/raspberry-image-resizer-docker/releases/download/v0.0.3/rpi-tool-darwin-arm64.tar.gz"
-    sha256 "ed2b9f70617104890b99b4705a56b35a288368aefa230a9ba547e731d2b03b3a"
+    sha256 "823fc1de743cf212ffd9fc62d6f04086511f83fed4db18a990c76f0eccd8ecf6"
   else
     url "https://github.com/aheissenberger/raspberry-image-resizer-docker/releases/download/v0.0.3/rpi-tool-darwin-amd64.tar.gz"
     sha256 "0000000000000000000000000000000000000000000000000000000000000000"
