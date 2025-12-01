@@ -4,6 +4,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { existsSync } from "fs";
 import { join } from "path";
 import { spawn } from "bun";
 import {
@@ -44,33 +45,41 @@ async function runCLI(args: string[]): Promise<{
   };
 }
 
+async function ensureDockerImage(name: string): Promise<void> {
+  const exists = await dockerImageExists(name);
+  if (exists) {
+    console.log(`[E2E] Docker image '${name}' present`);
+    return;
+  }
+  console.log(`[E2E] Docker image '${name}' missing, building...`);
+  const proc = spawn({
+    cmd: ["docker", "build", "-t", name, "."],
+    cwd: process.cwd(),
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  const code = await proc.exited;
+  if (code !== 0) {
+    throw new Error(`Failed to build Docker image '${name}' (exit ${code})`);
+  }
+  console.log(`[E2E] Built Docker image '${name}'`);
+}
+
 describe("Compression Workflow E2E Tests", () => {
   beforeAll(async () => {
-    // Check Docker is available
     const dockerReady = await waitForDocker();
-    if (!dockerReady) {
+    if (!dockerReady) throw new Error("Docker not available");
+
+    // Auto-build image if missing
+    await ensureDockerImage("rpi-image-resizer:latest");
+
+    if (!existsSync(CLI_PATH)) {
       throw new Error(
-        "Docker is not available. Please start Docker Desktop and try again."
+        `CLI executable not found at ${CLI_PATH}. Build with: bun run build:cli`
       );
     }
-
-    // Check Docker image exists
-    const imageExists = await dockerImageExists("rpi-image-resizer:latest");
-    if (!imageExists) {
-      throw new Error(
-        'Docker image "rpi-image-resizer:latest" not found. Please build it first with: bun run docker:build'
-      );
-    }
-
-    // Check CLI executable exists
-    if (!(await Bun.file(CLI_PATH).exists())) {
-      throw new Error(
-        `CLI executable not found at ${CLI_PATH}. Please build it first with: bun run build:cli`
-      );
-    }
-
     console.log("\n[E2E] Prerequisites verified\n");
-  }, 30000);
+  }, 60000);
 
   afterAll(async () => {
     // Clean up all test artifacts
