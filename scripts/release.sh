@@ -71,7 +71,7 @@ if command -v gh >/dev/null 2>&1; then
       --field message="chore: update rpi-image-resizer to v$VER" \
       --field content="$(echo "$FORMULA_CONTENT" | base64)" \
       --field sha="$CURRENT_SHA" \
-      --field branch="master" > /dev/null
+      --field branch="main" > /dev/null
     echo "✓ Homebrew tap formula updated successfully!"
   else
     # Create new file
@@ -80,7 +80,7 @@ if command -v gh >/dev/null 2>&1; then
       --method PUT \
       --field message="chore: add rpi-image-resizer v$VER" \
       --field content="$(echo "$FORMULA_CONTENT" | base64)" \
-      --field branch="master" > /dev/null
+      --field branch="main" > /dev/null
     echo "✓ Homebrew tap formula created successfully!"
   fi
 else
