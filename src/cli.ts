@@ -4,13 +4,14 @@ import { parseArgs } from "./lib/args";
 import { BunExecutor } from "./lib/executor";
 import { buildCompressor, buildDecompressor, detectCompressionByExt, validateLevel } from "./lib/compress";
 import { ensureImage, runWorker } from "./lib/docker";
+import pkg from "../package.json";
 
-const VERSION = "0.1.0";
+const VERSION: string = (pkg as any).version || "0.0.0";
 
 function usage() {
   console.log(`raspberry-image-tool v${VERSION}\n\n` +
 `Usage:\n  bun run src/cli.ts <command> [options]\n\n` +
-`Commands:\n  clone <output-image>       Clone SD to image (macOS)\n  write <image>              Write image to SD (macOS)\n  resize <image>             Resize and adjust partitions (Docker)\n\n` +
+`Commands:\n  version                    Print version\n  clone <output-image>       Clone SD to image (macOS)\n  write <image>              Write image to SD (macOS)\n  resize <image>             Resize and adjust partitions (Docker)\n\n` +
 `Global Options:\n  -h, --help                 Show help\n  -v, --version              Show version\n\n` +
 `Clone/Write Options:\n  --compress <zstd|xz|gzip>  Compress output during clone\n  --level <n>                Compression level\n\n` +
 `Resize Options:\n  --boot-size <MB>           Target boot partition size (default 256)\n  --image-size <SIZE>        Change overall image size (e.g. 32GB, 8192MB)\n  --unsafe-resize-ext4       Run resize2fs on root when not moving (unsafe)\n  --dry-run                  Plan only, do not modify\n  --verbose                  Verbose logs\n  --docker-image <name>      Docker image name (default rpi-image-resizer:latest)\n`);
@@ -28,6 +29,9 @@ async function main() {
   if (argv.includes("-v") || argv.includes("--version")) { console.log(VERSION); return; }
   const [command, ...rest] = argv;
   if (!command) return usage();
+
+  // Support `version` as a command
+  if (command === "version") { console.log(VERSION); return; }
 
   const exec = new BunExecutor();
 
@@ -133,7 +137,6 @@ async function main() {
     if (!image) throw new Error("Missing <image>");
 
     const dockerImage = (args["docker-image"] as string) || "rpi-image-resizer:latest";
-    await ensureImage(exec, dockerImage, process.cwd());
 
     // If compressed, decompress to temp file first (unless dry-run)
     let workImage = image;
@@ -189,6 +192,9 @@ async function main() {
         DRY_RUN: args["dry-run"] ? "1" : "0",
         VERBOSE: args["verbose"] ? "1" : "0",
       } as Record<string, string>;
+
+      // Ensure Docker image exists (will auto-build from embedded resources if needed)
+      await ensureImage(exec, dockerImage);
 
       const result = await runWorker(exec, {
         image: dockerImage,

@@ -28,6 +28,11 @@ The Docker‑based solution shall:
 - Resize or recreate the boot partition (FAT32).
 - Leave the ext4 root filesystem intact unless explicitly requested.
 - Run a **TypeScript worker** (`worker.js`) compiled from `src/worker/worker.ts` using Bun runtime inside the container.
+- **Auto-build from embedded resources**: If Docker image doesn't exist:
+  - Extract embedded Dockerfile and worker.js to temporary directory
+  - Run `docker build` automatically
+  - Clean up temporary files after build
+  - Proceed with resize operation using newly built image
 
 ---
 
@@ -44,8 +49,12 @@ The Docker‑based solution shall:
 
 ## 3. Technical Architecture
 
-- **CLI**: TypeScript-based command-line interface compiled to native executable (`dist/rpi-tool`)
+- **CLI**: TypeScript-based command-line interface compiled to native executable (`dist/rpi-tool`, 57MB)
+  - **Self-contained binary**: Embeds Dockerfile and worker.js at compile time
+  - **Auto-build capability**: Automatically builds Docker image on first run if not present
+  - **No manual Docker build required**: Users only need Docker Desktop running
 - **Worker**: TypeScript resize logic (`src/worker/worker.ts`) compiled to JavaScript and executed in Docker
+- **Embedded Resources** (`src/lib/embedded.ts`): Contains Dockerfile and worker.js as compile-time constants
 - **Test Infrastructure**: TypeScript test harness (`src/test-helper.ts`) for E2E testing
 - **Docker Container**: Ubuntu 24.04 with Bun runtime and Linux partition tools
 
@@ -516,8 +525,9 @@ The write command must:
 - **Test Name Filtering**: `bun test --test-name-pattern <pattern>` for targeted test execution
 - **Build Validation**: All tests run on compiled output (`dist/worker/worker.js`)
 - **Coverage**: 100% of core workflows validated
+- **Embedded Resources**: Tests validate auto-build from embedded Dockerfile and worker.js
 
-**Overall Test Results**: 10/10 tests passing (5 unit + 5 E2E)
+**Overall Test Results**: 15/15 tests passing (5 unit + 7 compression + 3 resize E2E)
 
 ---
 
@@ -526,12 +536,17 @@ The write command must:
 ### Completed
 - ✅ **Full TypeScript Migration**: All bash scripts converted to native TypeScript
 - ✅ **Native Bun APIs**: Using Bun.spawn, Bun.file, Bun.Glob, Bun.CryptoHasher throughout
-- ✅ **Comprehensive Test Suite**: 10/10 tests passing with full E2E coverage
+- ✅ **Comprehensive Test Suite**: 15/15 tests passing (5 unit + 7 compression + 3 resize E2E)
 - ✅ **Image Size Adjustment**: Expand/shrink images with automatic root partition adjustment
 - ✅ **Compression Support**: Auto-detect and decompress .zst/.xz/.gz files
 - ✅ **Dry-run Mode**: Preview operations without destructive actions
 - ✅ **Loop Device Management**: Proper cleanup and detachment in all code paths
-- ✅ **Production Ready**: Compiled worker (16.68 KB), compiled CLI, zero bash dependencies
+- ✅ **Embedded Docker Image**: Self-contained binary with auto-build capability
+  - Dockerfile and worker.js embedded at compile time using Bun import assertions
+  - Automatic Docker image build on first run (no manual docker build needed)
+  - Binary size: 57MB (includes Bun runtime + embedded resources)
+  - Users only need Docker Desktop running
+- ✅ **Production Ready**: Compiled worker (16.58 KB), compiled CLI (57MB), zero bash dependencies, single-binary distribution
 
 ### Future Enhancements
 

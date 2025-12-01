@@ -1,4 +1,7 @@
 import type { Executor } from "./executor";
+import { DOCKERFILE, WORKER_JS } from "./embedded";
+import { existsSync, mkdirSync } from "fs";
+import { join } from "path";
 
 export type DockerRunOptions = {
   image: string; // docker image name
@@ -8,10 +11,42 @@ export type DockerRunOptions = {
   entry?: string[]; // override entrypoint/cmd
 };
 
-export async function ensureImage(exe: Executor, image: string, contextDir: string) {
+/**
+ * Check if Docker image exists, and build it from embedded resources if not
+ */
+export async function ensureImage(exe: Executor, image: string, contextDir?: string) {
   const inspect = await exe.run(["docker", "image", "inspect", image], { allowNonZeroExit: true });
   if (inspect.code === 0) return;
-  await exe.run(["docker", "build", "-t", image, contextDir]);
+
+  // If contextDir provided (development mode), use it
+  if (contextDir && existsSync(contextDir)) {
+    console.log(`Building Docker image from ${contextDir}...`);
+    await exe.run(["docker", "build", "-t", image, contextDir]);
+    return;
+  }
+
+  // Otherwise, build from embedded resources (production mode)
+  console.log(`Building Docker image (first run)...`);
+  const tempDir = join("/tmp", `docker-build-${Date.now()}`);
+  
+  try {
+    mkdirSync(tempDir, { recursive: true });
+    
+    // Write embedded resources
+    await Bun.write(join(tempDir, "Dockerfile"), DOCKERFILE);
+    await Bun.write(join(tempDir, "worker.js"), WORKER_JS);
+    
+    // Build image
+    await exe.run(["docker", "build", "-t", image, tempDir]);
+    console.log("✓ Docker image ready");
+  } finally {
+    // Cleanup temp directory
+    try {
+      await exe.run(["rm", "-rf", tempDir], { allowNonZeroExit: true });
+    } catch {
+      // Ignore cleanup errors
+    }
+  }
 }
 
 export async function runWorker(exe: Executor, opts: DockerRunOptions) {

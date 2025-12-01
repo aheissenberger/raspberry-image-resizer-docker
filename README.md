@@ -21,46 +21,86 @@ A **cross-platform, safe, reproducible** solution for resizing and modifying Ras
 ## Requirements
 
 - **macOS** 13 (Ventura), 14 (Sonoma), or 15 (Sequoia)
-- **Docker Desktop** installed and running
+- **Docker Desktop** installed and running (Docker image auto-builds on first run)
 - A Raspberry Pi disk image (`.img` file)
 - Sufficient disk space for backup (same size as original image)
 
+**Note:** The CLI binary embeds all necessary resources (Dockerfile and worker code). The Docker image will be automatically built on first use.
+
+## Install (Homebrew)
+
+```bash
+# Add the tap (first time only)
+brew tap aheissenberger/rpi-tools
+
+# Install the precompiled binary
+brew install rpi-image-resizer
+
+# Verify installation
+rpi-tool --version
+```
+
+Requirements: Docker Desktop must be installed and running. On first run, the Docker image builds automatically using embedded resources.
+
 ## Quick Start
 
-### 1. Clone or Download This Repository
+### For End Users (Binary Distribution)
+
+1. **Download the compiled binary**: `rpi-tool` (or build from source, see Development section)
+2. **Ensure Docker Desktop is running**
+3. **Run the tool**:
 
 ```bash
+# First run automatically builds the Docker image (one-time, ~2 minutes)
+./rpi-tool resize path/to/raspios.img
+
+# Subsequent runs use the cached image (fast)
+./rpi-tool resize another-image.img --boot-size 512
+
+# Print version
+./rpi-tool --version
+# Or
+./rpi-tool version
+```
+
+The binary is **self-contained** (57MB) and includes:
+- Compiled CLI executable (no Bun runtime needed)
+- Embedded Dockerfile
+- Embedded worker code
+
+On first run, it automatically builds a Docker image with all necessary Linux tools (sfdisk, e2fsck, mkfs.vfat, kpartx, etc.).
+
+### For Developers (Build from Source)
+
+```bash
+# 1. Clone repository
 git clone <repository-url>
 cd raspberry-image-resizer-docker
-```
 
-### 2. Install Dependencies
-
-```bash
+# 2. Install dependencies
 bun install
-```
 
-### 3. Build the CLI and Docker Image
-
-```bash
-# Build everything (CLI executable + Docker worker + Docker image)
+# 3. Build the CLI (embeds Dockerfile and worker)
 bun run build
-bun run docker:build
 
-# The CLI is compiled to a standalone executable:
-# ./dist/rpi-tool (no Bun runtime required on macOS)
+# 4. The CLI is now at ./dist/rpi-tool (self-contained, 57MB)
+./dist/rpi-tool resize image.img
 ```
 
-This creates a Docker image with all necessary Linux tools (sfdisk, e2fsck, mkfs.vfat, kpartx, etc.).
-
-### 4. Resize an Image
+### Usage Examples
 
 ```bash
-# Use the compiled executable (no Bun required)
-./dist/rpi-tool resize path/to/raspios.img
+# Basic resize (auto-builds Docker image on first run)
+./rpi-tool resize path/to/raspios.img
 
-# Or during development with Bun:
+# With custom boot size
+./rpi-tool resize path/to/raspios.img --boot-size 512
+
+# Developers: run from source with Bun
 bun run src/cli.ts resize path/to/raspios.img
+
+# Show version
+./rpi-tool --version
 ```
 
 This will:
@@ -69,12 +109,12 @@ This will:
 - Preserve all boot files
 - Leave the root partition intact
 
-### 5. Clone or Write an SD Card (Optional)
+### Clone or Write an SD Card (Optional)
 
 If you need to create an image from a physical SD card first:
 
 ```bash
-./dist/rpi-tool clone raspios-backup.img
+./rpi-tool clone raspios-backup.img
 ```
 
 This will:
@@ -87,7 +127,7 @@ This will:
 To write an image back to an SD card:
 
 ```bash
-./dist/rpi-tool write raspios-backup.img
+./rpi-tool write raspios-backup.img
 ```
 
 This will:
@@ -104,12 +144,12 @@ The combined Bun CLI handles cloning and writing, with optional compression supp
 
 **Clone syntax:**
 ```bash
-./dist/rpi-tool clone <output-image-path> [--compress <algorithm>] [--level <1-9|1-19>]
+./rpi-tool clone <output-image-path> [--compress <algorithm>] [--level <1-9|1-19>]
 ```
 
 **Write syntax:**
 ```bash
-./dist/rpi-tool write <image-path>
+./rpi-tool write <image-path>
 ```
 
 **Compression options:**
@@ -119,16 +159,16 @@ The combined Bun CLI handles cloning and writing, with optional compression supp
 **Compression examples:**
 ```bash
 # Clone with zstd compression (fast, good compression)
-./dist/rpi-tool clone raspios-backup.img.zst --compress zstd --level 3
+./rpi-tool clone raspios-backup.img.zst --compress zstd --level 3
 
 # Clone with xz compression (slow, best compression)
-./dist/rpi-tool clone raspios-backup.img.xz --compress xz --level 9
+./rpi-tool clone raspios-backup.img.xz --compress xz --level 9
 
 # Clone with gzip compression (moderate speed and compression)
-./dist/rpi-tool clone raspios-backup.img.gz --compress gzip --level 6
+./rpi-tool clone raspios-backup.img.gz --compress gzip --level 6
 
 # Write a compressed image (auto-detects .zst/.xz/.gz)
-./dist/rpi-tool write raspios-backup.img.zst
+./rpi-tool write raspios-backup.img.zst
 ```
 
 **Clone process:**
@@ -165,7 +205,7 @@ The combined Bun CLI handles cloning and writing, with optional compression supp
 ### Basic Syntax
 
 ```bash
-./dist/rpi-tool resize <path-to-image> [options]
+./rpi-tool resize <path-to-image> [options]
 ```
 
 ### Options
@@ -183,32 +223,32 @@ The combined Bun CLI handles cloning and writing, with optional compression supp
 
 **Resize boot partition to 512MB:**
 ```bash
-./dist/rpi-tool resize raspios.img --boot-size 512
+./rpi-tool resize raspios.img --boot-size 512
 ```
 
 **Resize a compressed image (auto-detects .zst/.xz/.gz):**
 ```bash
-./dist/rpi-tool resize raspios.img.zst --boot-size 512
+./rpi-tool resize raspios.img.zst --boot-size 512
 ```
 
 **Preview changes without modifying:**
 ```bash
-./dist/rpi-tool resize raspios.img --dry-run
+./rpi-tool resize raspios.img --dry-run
 ```
 
 **Expand image and auto-grow root:**
 ```bash
-./dist/rpi-tool resize raspios.img --image-size 64GB --boot-size 256
+./rpi-tool resize raspios.img --image-size 64GB --boot-size 256
 ```
 
 **Shrink image (only if safe):**
 ```bash
-./dist/rpi-tool resize raspios.img --image-size 600MB --boot-size 64
+./rpi-tool resize raspios.img --image-size 600MB --boot-size 64
 ```
 
 **Verbose output for debugging:**
 ```bash
-./dist/rpi-tool resize raspios.img --boot-size 512 --verbose
+./rpi-tool resize raspios.img --boot-size 512 --verbose
 ```
 
 ## How It Works
@@ -252,13 +292,16 @@ All disk manipulations are inside a docker container on the copy of the image an
 ```
 macOS Host (Docker Desktop)
     │
-    ├── resize-image.sh
+    ├── rpi-tool (self-contained binary, 57MB)
+    │   ├── Embedded Dockerfile
+    │   ├── Embedded worker.js
+    │   ├── Auto-builds Docker image on first run
     │   ├── Creates backup
     │   ├── Validates inputs
     │   └── Launches Docker container
     │
-    └── Docker Container (Ubuntu 24.04)
-        └── resize-worker.sh
+    └── Docker Container (Ubuntu 24.04 + Bun runtime)
+        └── worker.js (TypeScript compiled)
             ├── Loop device management
             ├── Partition manipulation
             ├── Boot file backup/restore
@@ -279,7 +322,8 @@ raspberry-image-resizer-docker/
 │   │   ├── executor.ts        # Async process wrapper
 │   │   ├── args.ts            # Argument parser
 │   │   ├── compress.ts        # Compression utilities
-│   │   └── docker.ts          # Docker invocation wrapper
+│   │   ├── docker.ts          # Docker invocation wrapper
+│   │   └── embedded.ts        # Embedded resources (Dockerfile, worker.js)
 │   ├── worker/
 │   │   └── worker.ts          # Container worker (TypeScript)
 │   └── test-helper.ts         # E2E test harness (TypeScript)
@@ -385,7 +429,7 @@ brew install xz     # For .xz files
 ```
 [ERROR] Failed to build Docker image
 ```
-**Solution**: Check your internet connection and ensure Docker has sufficient resources (memory/disk space).
+**Solution**: Check your internet connection and ensure Docker has sufficient resources (memory/disk space). The image builds automatically on first run using embedded resources. To force a rebuild, remove the image: `docker rmi rpi-image-resizer:latest`
 
 ## Limitations
 
@@ -413,16 +457,37 @@ brew install xz     # For .xz files
 
 ## Advanced Usage
 
-### Building for Specific Architecture
+### Embedded Resources and Auto-Build
 
-The Dockerfile automatically supports both Intel (amd64) and Apple Silicon (arm64):
+The CLI binary embeds the Dockerfile and worker code at build time using Bun's import assertions:
 
+```typescript
+// Embedded at compile time
+import WORKER_JS from "../../dist/worker/worker.js" with { type: "text" };
+export const DOCKERFILE = `FROM ubuntu:24.04 ...`;
+```
+
+On first run, the CLI:
+1. Checks if Docker image exists (`docker inspect`)
+2. If missing, creates temp directory with embedded files
+3. Runs `docker build` automatically
+4. Cleans up temp directory
+5. Subsequent runs use cached image
+
+**Manual Docker build (development):**
 ```bash
-# Build for current architecture
-docker build -t rpi-image-resizer:latest .
+# Build Docker image from source (not needed for binary)
+bun run docker:build
 
-# Build multi-arch (requires buildx)
-docker buildx build --platform linux/amd64,linux/arm64 -t rpi-image-resizer:latest .
+# Or manually
+docker build -t rpi-image-resizer:latest .
+```
+
+**Force rebuild:**
+```bash
+# Remove cached image to trigger auto-rebuild
+docker rmi rpi-image-resizer:latest
+./rpi-tool resize image.img  # Rebuilds automatically
 ```
 
 ### Inspecting Docker Container
@@ -455,14 +520,15 @@ Clone an SD card and then resize it:
 
 ```bash
 # Step 1: Clone your SD card to an image
-./dist/rpi-tool clone original-raspios.img
+./rpi-tool clone original-raspios.img
 
 # Step 2: Resize the boot partition in the cloned image
-./dist/rpi-tool resize original-raspios.img --boot-size 512
+# (First run auto-builds Docker image)
+./rpi-tool resize original-raspios.img --boot-size 512
 
 # Optional: Expand or shrink the overall image and auto-adjust root
-./dist/rpi-tool resize original-raspios.img --image-size 64GB --boot-size 256
-./dist/rpi-tool resize original-raspios.img --image-size 600MB --boot-size 64
+./rpi-tool resize original-raspios.img --image-size 64GB --boot-size 256
+./rpi-tool resize original-raspios.img --image-size 600MB --boot-size 64
 
 # The resized image will be saved as original-raspios_202511261430.img
 # Original clone remains unchanged
@@ -474,9 +540,9 @@ If you previously used `clone-sd.sh` and `resize-image.sh`, here's the mapping t
 
 | Old Command | New Command |
 |-------------|-------------|
-| `./clone-sd.sh clone output.img` | `./dist/rpi-tool clone output.img` |
-| `./clone-sd.sh write input.img` | `./dist/rpi-tool write input.img` |
-| `./resize-image.sh image.img --boot-size 512` | `./dist/rpi-tool resize image.img --boot-size 512` |
+| `./clone-sd.sh clone output.img` | `./rpi-tool clone output.img` |
+| `./clone-sd.sh write input.img` | `./rpi-tool write input.img` |
+| `./resize-image.sh image.img --boot-size 512` | `./rpi-tool resize image.img --boot-size 512` |
 
 All features remain the same:
 - Compression support (`--compress`, `--level`)
