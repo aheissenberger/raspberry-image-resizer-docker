@@ -159,6 +159,12 @@ The combined Bun CLI handles cloning and writing, with optional compression supp
 - `--compress <algorithm>`: Compress output using `zstd`, `xz`, or `gzip`
 - `--level <1-9|1-19>`: Compression level (zstd: 1-19, xz/gzip: 1-9)
 
+**I/O options:**
+- `--block-size <SIZE>`: `dd` block size (default `4m`). Accepts values like `512k`, `1m`, `2m`, `4m`, `8m`, `1g`. Larger blocks reduce syscall overhead; `4m` is a solid default for most macOS SD readers.
+- `--device </dev/diskN>`: Override auto-detection and use a specific disk (advanced). Accepts `/dev/diskN` or `/dev/rdiskN` (raw). The tool will unmount/mount around the operation.
+- `--yes` (write only): Skip interactive confirmations. Dangerous; use only in automated contexts when absolutely sure.
+- `--preview`: Print the exact `dd` command that would run and exit without executing (safe, no changes).
+
 **Compression examples:**
 ```bash
 # Clone with zstd compression (fast, good compression)
@@ -172,6 +178,22 @@ The combined Bun CLI handles cloning and writing, with optional compression supp
 
 # Write a compressed image (auto-detects .zst/.xz/.gz)
 ./rpi-tool write raspios-backup.img.zst
+
+# Tune block size (advanced)
+./rpi-tool clone raspios-backup.img --block-size 8m
+./rpi-tool write raspios-backup.img --block-size 2m
+
+# Use a specific device (advanced)
+./rpi-tool clone raspios-backup.img --device /dev/disk2
+./rpi-tool write raspios-backup.img --device /dev/rdisk2
+
+# Automation helpers
+# Non-interactive write (DANGEROUS: ensure device is correct)
+./rpi-tool write raspios-backup.img --device /dev/rdisk2 --yes
+
+# Preview dd command only (no changes)
+./rpi-tool clone raspios-backup.img --device /dev/rdisk2 --preview
+./rpi-tool write raspios-backup.img --device /dev/rdisk2 --preview
 ```
 
 **Clone process:**
@@ -195,11 +217,32 @@ The combined Bun CLI handles cloning and writing, with optional compression supp
 - **Compression**: Requires `zstd`, `xz`, or `gzip` installed (install via Homebrew: `brew install zstd xz`)
 - **Write decompression**: Automatically detects `.zst`, `.xz`, `.gz` extensions and decompresses on-the-fly
 - Requires sudo privileges for `dd` operation
-- Uses raw device (`rdisk`) for faster performance
-- Press `Ctrl+T` during operations to see progress
+- Uses raw device (`/dev/rdiskX`) for faster performance
+- Continuous progress: `dd` runs with `status=progress`; the CLI streams progress from `stderr`
+- Tip (macOS): Press `Ctrl+T` to trigger an immediate `dd` progress update
 - Clone automatically checks for sufficient disk space
 - Compressed images save significant disk space (often 50-70% reduction)
 - On macOS, only mountable filesystems (e.g., FAT32 boot) will remount; ext4 root does not mount natively
+
+### Performance Tips
+
+- Raw device: Prefer `/dev/rdiskX` over `/dev/diskX` for significantly faster I/O on macOS.
+- Block size: Use `--block-size` to tune `dd` throughput. `4m` is a strong default; many readers plateau around `4m–8m`. Larger values reduce syscalls but usually show diminishing returns beyond `8m`.
+- Compression trade-offs: `zstd` is fastest with good ratios (multithreaded), `xz` compresses best but is slow (multithreaded), `gzip` is moderate and single-threaded. Pick based on whether CPU time or storage size is your priority.
+- Progress: The CLI enables `dd status=progress` and streams updates continuously; you can press `Ctrl+T` on macOS for an immediate snapshot.
+
+#### Quick benchmark (read-only)
+
+Replace `rdisk2` with your source device to gauge throughput with common block sizes:
+
+```zsh
+for bs in 512k 1m 2m 4m 8m 16m; do
+  echo "bs=$bs"
+  sudo dd if=/dev/rdisk2 of=/dev/null bs=$bs count=2048 status=progress 2>&1 | tail -n1
+done
+```
+
+This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/dev/null` discards data (no writes to the device). `2>&1 | tail -n1` captures `dd`'s final summary line because progress is printed to `stderr`. If you want a quicker sample, lower `count` (e.g., `count=256`).
 
 ---
 

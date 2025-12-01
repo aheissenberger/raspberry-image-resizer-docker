@@ -1,8 +1,11 @@
 #!/usr/bin/env bun
 import { spawn } from "bun";
+import readline from "node:readline";
 import { parseArgs } from "./lib/args";
 import { BunExecutor } from "./lib/executor";
+import { resolveBlockSize as _resolveBlockSize, buildCloneDdCommand, buildWriteDdCommand } from "./lib/dd";
 import { buildCompressor, buildDecompressor, detectCompressionByExt, validateLevel } from "./lib/compress";
+import { detectPiDisk, detectRemovableDisk, normalizeDevice } from "./lib/devices";
 import { ensureImage, runWorker } from "./lib/docker";
 import pkg from "../package.json";
 
@@ -13,7 +16,7 @@ function usage() {
 `Usage:\n  rpi-tool <command> [options]\n\n` +
 `Commands:\n  version                    Print version\n  clone <output-image>       Clone SD to image (macOS)\n  write <image>              Write image to SD (macOS)\n  resize <image>             Resize and adjust partitions (Docker)\n  clean                      Remove Docker images\n\n` +
 `Global Options:\n  -h, --help                 Show help\n  -v, --version              Show version\n\n` +
-`Clone/Write Options:\n  --compress <zstd|xz|gzip>  Compress output during clone\n  --level <n>                Compression level\n\n` +
+`Clone/Write Options:\n  --compress <zstd|xz|gzip>  Compress output during clone\n  --level <n>                Compression level\n  --block-size <SIZE>        dd block size (default 4m)\n  --device </dev/diskN>      Override auto-detect; use specific disk (advanced)\n  --yes                      Skip confirmations (write only; dangerous)\n  --preview                  Print the dd command and exit (no changes)\n\n` +
 `Resize Options:\n  --boot-size <MB>           Target boot partition size (default 256)\n  --image-size <SIZE>        Change overall image size (e.g. 32GB, 8192MB)\n  --unsafe-resize-ext4       Run resize2fs on root when not moving (unsafe)\n  --dry-run                  Plan only, do not modify\n  --verbose                  Verbose logs\n  --docker-image <name>      Docker image name (default rpi-image-resizer:latest)\n`);
 }
 
@@ -22,6 +25,15 @@ function escapePath(p: string) {
 }
 function dirname(p: string) { return p.substring(0, p.lastIndexOf("/")) || "."; }
 function basename(p: string) { return p.substring(p.lastIndexOf("/") + 1); }
+
+function resolveBlockSize(input?: string) {
+  const def = "4m";
+  const v = _resolveBlockSize(input);
+  if (input && v === def && input.trim().toLowerCase() !== def && !/^[1-9][0-9]*(?:[kKmMgG])?$/.test(input)) {
+    console.error(`Invalid --block-size '${input}', falling back to ${def}`);
+  }
+  return v;
+}
 
 async function main() {
   const argv = process.argv.slice(2);
@@ -38,30 +50,23 @@ async function main() {
   if (command === "clone") {
     const { args, positional } = parseArgs(rest, [
       { name: "compress", type: "string" },
-      { name: "level", type: "number" }
+      { name: "level", type: "number" },
+      { name: "block-size", type: "string" },
+      { name: "device", type: "string" },
+      { name: "preview", type: "boolean" }
     ]);
     const output = positional[0];
     if (!output) throw new Error("Missing <output-image>");
+    const bs = resolveBlockSize(args["block-size"] as string | undefined);
 
-    // Scan removable devices
-    const list = await exec.run(["diskutil", "list"]);
-    if (list.code !== 0) throw new Error("diskutil list failed");
-    // Simple interactive-less path: select first removable with boot partition
-    const disks = (await exec.run(["bash", "-lc", "diskutil list | grep -E '^/dev/disk[0-9]+' | awk '{print $1}'"]))
-      .stdout.trim().split(/\s+/).filter(Boolean);
-
-    let selected: string | undefined;
-    for (const d of disks) {
-      // check removable
-      const info = await exec.run(["bash", "-lc", `diskutil info ${d} | grep 'Removable Media:' | grep -q Removable && echo yes || echo no`]);
-      if (info.stdout.trim() !== "yes") continue;
-      // check FAT boot partition
-      const hasBoot = await exec.run(["bash", "-lc", `diskutil list ${d} | grep -E 'Windows_FAT_32.* boot' -q && echo yes || echo no`]);
-      if (hasBoot.stdout.trim() === "yes") { selected = d; break; }
-    }
+    const selected = args.device ? normalizeDevice(String(args.device)).disk : await detectPiDisk(exec);
     if (!selected) throw new Error("No removable Raspberry Pi SD card detected");
 
-    const raw = selected.replace("/dev/disk", "/dev/rdisk");
+    const raw = args.device ? normalizeDevice(String(args.device)).rdisk : selected.replace("/dev/disk", "/dev/rdisk");
+
+    if (args.device) {
+      console.warn(`Using explicit device override: ${selected} (raw ${raw}). Operation is read-only (clone).`);
+    }
 
     // Progress will be shown via dd's status=progress (or SIGINFO on macOS)
 
@@ -73,17 +78,16 @@ async function main() {
       compressor = buildCompressor(algo, args.level);
     }
 
-    // Unmount volumes (best-effort)
-    await exec.run(["diskutil", "unmountDisk", selected], { allowNonZeroExit: true });
-
-    // dd command with progress only using dd capabilities
-    if (compressor) {
-      const pipeCmd = `sudo dd if=${raw} bs=1m status=progress 2>/dev/stderr | ${compressor.join(" ")} > ${escapePath(output)}`;
-      await exec.run(["bash", "-lc", pipeCmd], { onStderrChunk: (s) => process.stderr.write(s) });
-    } else {
-      const cmd = `sudo dd if=${raw} of=${escapePath(output)} bs=1m status=progress`;
-      await exec.run(["bash", "-lc", cmd], { onStderrChunk: (s) => process.stderr.write(s) });
+    // Build dd command and optionally preview
+    const ddCmd = buildCloneDdCommand({ rawDevice: raw, outputPath: escapePath(output), blockSize: bs, compressor });
+    if (args.preview) {
+      console.log(ddCmd);
+      return;
     }
+
+    // Unmount volumes (best-effort) then run dd
+    await exec.run(["diskutil", "unmountDisk", selected], { allowNonZeroExit: true });
+    await exec.run(["bash", "-lc", ddCmd], { onStderrChunk: (s) => process.stderr.write(s) });
 
     await exec.run(["sync"], { allowNonZeroExit: true });
     await exec.run(["diskutil", "mountDisk", selected], { allowNonZeroExit: true });
@@ -92,35 +96,55 @@ async function main() {
   }
 
   if (command === "write") {
-    const { args: _args, positional } = parseArgs(rest, []);
+    const { args: _args, positional } = parseArgs(rest, [
+      { name: "block-size", type: "string" },
+      { name: "device", type: "string" },
+      { name: "yes", type: "boolean" },
+      { name: "preview", type: "boolean" }
+    ]);
     const image = positional[0];
     if (!image) throw new Error("Missing <image>");
+    const bs = resolveBlockSize(_args["block-size"] as string | undefined);
 
     // choose target device
-    const disks = (await exec.run(["bash", "-lc", "diskutil list | grep -E '^/dev/disk[0-9]+' | awk '{print $1}'"]))
-      .stdout.trim().split(/\s+/).filter(Boolean);
-    let selected: string | undefined;
-    for (const d of disks) {
-      const info = await exec.run(["bash", "-lc", `diskutil info ${d} | grep 'Removable Media:' | grep -q Removable && echo yes || echo no`]);
-      if (info.stdout.trim() === "yes") { selected = d; break; }
-    }
+    const selected = _args.device ? normalizeDevice(String(_args.device)).disk : await detectRemovableDisk(exec);
     if (!selected) throw new Error("No removable device detected for write");
-    const raw = selected.replace("/dev/disk", "/dev/rdisk");
+    const raw = _args.device ? normalizeDevice(String(_args.device)).rdisk : selected.replace("/dev/disk", "/dev/rdisk");
+
+    // Double confirmation for destructive write (unless --yes)
+    if (!_args.yes) {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const ask = (q: string) => new Promise<string>((resolve) => rl.question(q, (ans) => resolve(ans.trim())));
+      console.warn(`About to WRITE image to device: ${selected} (raw ${raw})`);
+      const ans1 = await ask("Are you sure you want to proceed? Type 'yes' to continue: ");
+      if (ans1.toLowerCase() !== "yes") {
+        rl.close();
+        console.error("Aborted by user.");
+        return;
+      }
+      const ans2 = await ask("Final confirmation: type 'WRITE' to proceed: ");
+      rl.close();
+      if (ans2 !== "WRITE") {
+        console.error("Aborted by user.");
+        return;
+      }
+    } else {
+      console.warn("--yes provided: skipping interactive confirmations (dangerous).");
+    }
 
     // detect decompressor
     const algo = detectCompressionByExt(image);
     const decomp = algo ? buildDecompressor(algo) : undefined;
 
-    await exec.run(["diskutil", "unmountDisk", selected], { allowNonZeroExit: true });
-
-    // Progress for write using dd only
-    if (decomp) {
-      const cmd = `${decomp.join(" ")} ${escapePath(image)} | sudo dd of=${raw} bs=1m status=progress 2>/dev/stderr`;
-      await exec.run(["bash", "-lc", cmd], { onStderrChunk: (s) => process.stderr.write(s) });
-    } else {
-      const cmd = `sudo dd if=${escapePath(image)} of=${raw} bs=1m status=progress`;
-      await exec.run(["bash", "-lc", cmd], { onStderrChunk: (s) => process.stderr.write(s) });
+    // Build dd command and optionally preview
+    const ddCmdW = buildWriteDdCommand({ rawDevice: raw, imagePath: escapePath(image), blockSize: bs, decompressor: decomp });
+    if (_args.preview) {
+      console.log(ddCmdW);
+      return;
     }
+
+    await exec.run(["diskutil", "unmountDisk", selected], { allowNonZeroExit: true });
+    await exec.run(["bash", "-lc", ddCmdW], { onStderrChunk: (s) => process.stderr.write(s) });
 
     await exec.run(["sync"], { allowNonZeroExit: true });
     await exec.run(["diskutil", "mountDisk", selected], { allowNonZeroExit: true });
