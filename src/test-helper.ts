@@ -3,9 +3,8 @@
  * and validate resize operations. Replaces test-create-and-resize.sh
  */
 
-import { existsSync, unlinkSync } from "fs";
-import { join } from "path";
-import { spawn } from "bun";
+import { existsSync, unlinkSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 
 interface TestConfig {
   imageFile: string;
@@ -24,18 +23,14 @@ function log(message: string): void {
 
 async function run(cmd: string[], options: { allowFail?: boolean } = {}): Promise<{ success: boolean; output: string }> {
   try {
-    const proc = spawn({
-      cmd,
+    const proc = Bun.spawn(cmd, {
       stdout: "pipe",
       stderr: "pipe",
-      env: process.env as Record<string, string>,
     });
 
-    const [exitCode, stdout, stderr] = await Promise.all([
-      proc.exited,
-      proc.stdout.text(),
-      proc.stderr.text(),
-    ]);
+    const stdout = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+    const exitCode = await proc.exited;
 
     const result = {
       success: exitCode === 0,
@@ -47,25 +42,31 @@ async function run(cmd: string[], options: { allowFail?: boolean } = {}): Promis
     }
 
     return result;
-  } catch (error: any) {
+  } catch (error: unknown) {
     if (!options.allowFail) {
       throw error;
     }
-    return { success: false, output: error.message };
+    return { success: false, output: error instanceof Error ? error.message : String(error) };
   }
 }
 
-async function findFilesRecursive(dir: string): Promise<string[]> {
-  const files: string[] = [];
-  const entries = await Array.fromAsync(new Bun.Glob("**/*").scan({ cwd: dir, absolute: true }));
-  
-  for (const entry of entries) {
-    const file = Bun.file(entry);
-    if ((await file.exists()) && file.size !== undefined) {
-      files.push(entry);
+function findFilesRecursiveSync(dir: string, files: string[] = []): string[] {
+  try {
+    const entries = readdirSync(dir, { withFileTypes: true });
+    
+    for (const entry of entries) {
+      const fullPath = join(dir, entry.name);
+      
+      if (entry.isDirectory()) {
+        findFilesRecursiveSync(fullPath, files);
+      } else if (entry.isFile()) {
+        files.push(fullPath);
+      }
     }
+  } catch {
+    // Skip directories we can't read
   }
-  
+
   return files;
 }
 
@@ -73,21 +74,22 @@ async function createSnapshot(mountPoint: string, outputFile: string): Promise<v
   log(`Recording snapshot: ${outputFile}`);
   
   // Find all files
-  const files = await findFilesRecursive(mountPoint);
+  const files = findFilesRecursiveSync(mountPoint);
   
   // Compute checksums for each file using Bun's crypto
   const checksums: string[] = [];
   for (const file of files) {
     try {
-      const hasher = new Bun.CryptoHasher("sha256");
       const fileContent = Bun.file(file);
-      hasher.update(await fileContent.arrayBuffer());
+      const buffer = await fileContent.arrayBuffer();
+      const hasher = new Bun.CryptoHasher("sha256");
+      hasher.update(new Uint8Array(buffer));
       const checksum = hasher.digest("hex");
       
       // Get relative path
-      const relativePath = file.replace(mountPoint + "/", "");
+      const relativePath = file.replace(`${mountPoint}/`, "");
       checksums.push(`${checksum}  ${relativePath}`);
-    } catch (error) {
+    } catch {
       // Skip files we can't read
     }
   }
@@ -97,16 +99,16 @@ async function createSnapshot(mountPoint: string, outputFile: string): Promise<v
   await Bun.write(`/work/${outputFile}`, checksums.join("\n") + "\n");
 }
 
-async function main() {
+async function main(): Promise<void> {
   const config: TestConfig = {
-    imageFile: process.env.IMAGE_FILE || "test.img",
-    bootSizeMB: parseInt(process.env.BOOT_SIZE_MB || "256"),
+    imageFile: process.env.IMAGE_FILE ?? "test.img",
+    bootSizeMB: parseInt(process.env.BOOT_SIZE_MB ?? "256", 10),
     initialBootMB: 64,
-    initialImageMB: parseInt(process.env.INITIAL_IMAGE_MB || "700"),
+    initialImageMB: parseInt(process.env.INITIAL_IMAGE_MB ?? "700", 10),
     targetImageMB: process.env.TARGET_IMAGE_MB
-      ? parseInt(process.env.TARGET_IMAGE_MB)
+      ? parseInt(process.env.TARGET_IMAGE_MB, 10)
       : undefined,
-    freeTailMB: parseInt(process.env.FREE_TAIL_MB || "0"),
+    freeTailMB: parseInt(process.env.FREE_TAIL_MB ?? "0", 10),
     verbose: process.env.VERBOSE === "1",
     snapshot: process.env.SNAPSHOT === "1",
   };
@@ -116,13 +118,13 @@ async function main() {
 
   log(`Configuration: ${JSON.stringify(config, null, 2)}`);
 
-  // Remove existing image (check before removing to avoid errors)
+  // Remove existing image
   try {
     if (existsSync(imagePath)) {
       log(`Removing existing image ${config.imageFile}`);
       unlinkSync(imagePath);
     }
-  } catch (error: any) {
+  } catch {
     // Ignore if file doesn't exist
   }
 
@@ -175,17 +177,20 @@ ${loopDevice}p2 : start=${rootStart}, size=${rootSizeSectors}, type=83
 `;
 
     await Bun.write("/tmp/layout.sfdisk", sfdiskLayout);
-    
-    // Run sfdisk with stdin from file
-    const layoutFile = Bun.file("/tmp/layout.sfdisk");
-    const sfdiskProc = spawn({
-      cmd: ["sfdisk", loopDevice],
-      stdin: layoutFile,
+
+    // Run sfdisk with stdin - use Bun.spawn with stdin as string
+    const layoutContent = await Bun.file("/tmp/layout.sfdisk").text();
+    const sfdiskProc = Bun.spawn(["sfdisk", loopDevice], {
+      stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
     });
+
+    // Write to stdin using Bun's FileSink write method
+    sfdiskProc.stdin.write(layoutContent);
+    sfdiskProc.stdin.end();
     await sfdiskProc.exited;
-    
+
     await run(["sync"]);
 
     // Detach and reattach with partition scan
@@ -197,9 +202,9 @@ ${loopDevice}p2 : start=${rootStart}, size=${rootSizeSectors}, type=83
     // Create kpartx mappings
     log("Creating kpartx mappings for partitions...");
     await run(["kpartx", "-av", loopDevice2]);
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await Bun.sleep(1000);
 
-    const loopBasename = loopDevice2.split("/").pop();
+    const loopBasename = loopDevice2.split("/").pop() ?? "loop0";
     const bootPart = `/dev/mapper/${loopBasename}p1`;
     const rootPart = `/dev/mapper/${loopBasename}p2`;
 
@@ -291,7 +296,7 @@ ${loopDevice}p2 : start=${rootStart}, size=${rootSizeSectors}, type=83
 
     log("Syncing before resize run...");
     await run(["sync"]);
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await Bun.sleep(1000);
 
     // Detach loop device and remove kpartx mappings before worker runs
     log("Detaching loop device before worker...");
@@ -338,9 +343,9 @@ ${loopDevice}p2 : start=${rootStart}, size=${rootSizeSectors}, type=83
     log(`Post loop device: ${postLoop}`);
 
     await run(["kpartx", "-av", postLoop]);
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await Bun.sleep(1000);
 
-    const postLoopBasename = postLoop.split("/").pop();
+    const postLoopBasename = postLoop.split("/").pop() ?? "loop0";
     const postRoot = `/dev/mapper/${postLoopBasename}p2`;
     const postBoot = `/dev/mapper/${postLoopBasename}p1`;
 
@@ -380,9 +385,13 @@ ${loopDevice}p2 : start=${rootStart}, size=${rootSizeSectors}, type=83
     await run(["losetup", "-d", postLoop]);
 
     log("All done.");
-  } catch (error: any) {
-    log(`Error: ${error.message}`);
-    console.error(error.stack);
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
+    log(`Error: ${errorMessage}`);
+    if (errorStack) {
+      console.error(errorStack);
+    }
     // Cleanup on error
     await run(["kpartx", "-d", loopDevice], { allowFail: true });
     await run(["losetup", "-d", loopDevice], { allowFail: true });

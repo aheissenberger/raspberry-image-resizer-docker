@@ -15,7 +15,13 @@
     "clean": "rm -rf dist"
   },
   "devDependencies": {
-    "bun-types": "latest"
+    "bun-types": "latest",
+    "@types/bun": "latest"
   },
-  "type": "module"
+  "type": "module",
+  "module": "index.ts",
+  "private": true,
+  "peerDependencies": {
+    "typescript": "^5"
+  }
 }

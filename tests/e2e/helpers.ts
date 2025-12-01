@@ -4,7 +4,6 @@
 
 import { spawn } from "bun";
 import { existsSync, unlinkSync } from "fs";
-import { join } from "path";
 
 export interface TestImageConfig {
   filename: string;
@@ -103,18 +102,13 @@ export async function runDockerTest(
     stderr: "pipe",
   });
 
-  let output = "";
-  let error = "";
+  // Read streams using Bun's Response wrapper
+  const exitCode = await proc.exited;
+  const stdoutText = await new Response(proc.stdout).text();
+  const stderrText = await new Response(proc.stderr).text();
 
-  // Read streams using Bun's text() method
-  const [exitCode, stdoutText, stderrText] = await Promise.all([
-    proc.exited,
-    proc.stdout.text(),
-    proc.stderr.text(),
-  ]);
-
-  output = stdoutText;
-  error = stderrText;
+  const output = stdoutText;
+  const error = stderrText;
 
   if (config.verbose) {
     if (output) process.stdout.write(output);
@@ -250,7 +244,7 @@ export async function compressFile(
 
   // For xz and gzip, redirect stdout to output file
   if (algorithm !== "zstd") {
-    const stdoutText = await proc.stdout.text();
+    const stdoutText = await new Response(proc.stdout).text();
     await Bun.write(outputFile, stdoutText);
   }
 

@@ -8,7 +8,6 @@ const env = (k: string, d?: string) => (process.env[k] ?? d ?? "");
 const INFO = (s: string) => console.log(`[INFO] ${s}`);
 const WARN = (s: string) => console.log(`[WARN] ${s}`);
 const ERROR = (s: string) => console.error(`[ERROR] ${s}`);
-const DEBUG = (s: string) => { if (env("VERBOSE") === "1") console.log(`[DEBUG] ${s}`); };
 
 const DRY = env("DRY_RUN") === "1";
 
@@ -346,7 +345,6 @@ function parseSfdiskDump(dump: string, loop: string) {
   }
   if (!boot.start || !root.start) throw new Error("Failed to parse partition table via sfdisk");
   // total disk sectors
-  const sizeLine = lines.find(l => l.includes("label: dos") || l.includes("label-id:")) || "";
   return { diskSectors: 0, boot, root };
 }
 
@@ -363,7 +361,6 @@ async function rereadMappings(exe: Executor, loop: string) {
   await new Promise((resolve) => setTimeout(resolve, 1000));
 }
 
-function sh(p: string) { return `'${p.replaceAll("'", "'\\''")}'`; }
 
 if (import.meta.main) {
   const exe = new BunExecutor();

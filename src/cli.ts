@@ -16,6 +16,12 @@ function usage() {
 `Resize Options:\n  --boot-size <MB>           Target boot partition size (default 256)\n  --image-size <SIZE>        Change overall image size (e.g. 32GB, 8192MB)\n  --unsafe-resize-ext4       Run resize2fs on root when not moving (unsafe)\n  --dry-run                  Plan only, do not modify\n  --verbose                  Verbose logs\n  --docker-image <name>      Docker image name (default rpi-image-resizer:latest)\n`);
 }
 
+function escapePath(p: string) {
+  return `'${p.replaceAll("'", "'\\''")}'`;
+}
+function dirname(p: string) { return p.substring(0, p.lastIndexOf("/")) || "."; }
+function basename(p: string) { return p.substring(p.lastIndexOf("/") + 1); }
+
 async function main() {
   const argv = process.argv.slice(2);
   if (argv.includes("-h") || argv.includes("--help")) return usage();
@@ -80,7 +86,7 @@ async function main() {
   }
 
   if (command === "write") {
-    const { args, positional } = parseArgs(rest, []);
+    const { args: _args, positional } = parseArgs(rest, []);
     const image = positional[0];
     if (!image) throw new Error("Missing <image>");
 
@@ -148,10 +154,9 @@ async function main() {
           stdout: Bun.file(tempPath),
           stderr: "pipe",
         });
-        const [exitCode, stderr] = await Promise.all([
-          proc.exited,
-          proc.stderr.text(),
-        ]);
+        const exitCode = await proc.exited;
+        const stderr = await new Response(proc.stderr).text();
+        
         if (exitCode !== 0) {
           throw new Error(`Decompression failed with code ${exitCode}\n${stderr}`);
         }
@@ -203,12 +208,6 @@ async function main() {
 
   return usage();
 }
-
-function escapePath(p: string) {
-  return `'${p.replaceAll("'", "'\\''")}'`;
-}
-function dirname(p: string) { return p.substring(0, p.lastIndexOf("/")) || "."; }
-function basename(p: string) { return p.substring(p.lastIndexOf("/") + 1); }
 
 await main().catch((e) => { 
   console.error(e.message || e);

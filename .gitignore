@@ -5,3 +5,4 @@ snapshot-*.txt
 test-*.img*
 *.decompressed_*.img
 *.bun-build
+node_modules/
