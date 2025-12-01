@@ -11,7 +11,7 @@ const VERSION: string = (pkg as any).version || "0.0.0";
 function usage() {
   console.log(`raspberry-image-tool v${VERSION}\n\n` +
 `Usage:\n  rpi-tool <command> [options]\n\n` +
-`Commands:\n  version                    Print version\n  clone <output-image>       Clone SD to image (macOS)\n  write <image>              Write image to SD (macOS)\n  resize <image>             Resize and adjust partitions (Docker)\n\n` +
+`Commands:\n  version                    Print version\n  clone <output-image>       Clone SD to image (macOS)\n  write <image>              Write image to SD (macOS)\n  resize <image>             Resize and adjust partitions (Docker)\n  clean                      Remove Docker images\n\n` +
 `Global Options:\n  -h, --help                 Show help\n  -v, --version              Show version\n\n` +
 `Clone/Write Options:\n  --compress <zstd|xz|gzip>  Compress output during clone\n  --level <n>                Compression level\n\n` +
 `Resize Options:\n  --boot-size <MB>           Target boot partition size (default 256)\n  --image-size <SIZE>        Change overall image size (e.g. 32GB, 8192MB)\n  --unsafe-resize-ext4       Run resize2fs on root when not moving (unsafe)\n  --dry-run                  Plan only, do not modify\n  --verbose                  Verbose logs\n  --docker-image <name>      Docker image name (default rpi-image-resizer:latest)\n`);
@@ -121,6 +121,30 @@ async function main() {
     await exec.run(["sync"], { allowNonZeroExit: true });
     await exec.run(["diskutil", "mountDisk", selected], { allowNonZeroExit: true });
     console.log("✓ Write completed");
+    return;
+  }
+
+  if (command === "clean") {
+    console.log("Cleaning Docker images and build artifacts...\n");
+    
+    // Remove Docker images
+    const images = ["rpi-image-resizer:latest"];
+    for (const img of images) {
+      const check = await exec.run(["docker", "image", "inspect", img], { allowNonZeroExit: true });
+      if (check.code === 0) {
+        console.log(`Removing Docker image: ${img}...`);
+        const result = await exec.run(["docker", "rmi", img]);
+        if (result.code === 0) {
+          console.log(`✓ Removed ${img}`);
+        } else {
+          console.error(`✗ Failed to remove ${img}`);
+        }
+      } else {
+        console.log(`Docker image ${img} not found`);
+      }
+    }
+
+    console.log("\n✓ Clean completed");
     return;
   }
 

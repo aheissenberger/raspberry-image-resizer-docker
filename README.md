@@ -96,6 +96,9 @@ bun run build
 # With custom boot size
 ./rpi-tool resize path/to/raspios.img --boot-size 512
 
+# Clean up Docker images and build artifacts
+./rpi-tool clean
+
 # Developers: run from source with Bun
 bun run src/cli.ts resize path/to/raspios.img
 
@@ -492,6 +495,21 @@ brew install xz     # For .xz files
 [ERROR] Failed to build Docker image
 ```
 **Solution**: Check your internet connection and ensure Docker has sufficient resources (memory/disk space). The image builds automatically on first run using embedded resources. To force a rebuild, remove the image: `docker rmi rpi-image-resizer:latest`
+
+## Maintenance
+
+### Cleaning Up
+
+Remove Docker images and build artifacts to free disk space:
+
+```bash
+./rpi-tool clean
+```
+
+This command removes:
+- Docker image: `rpi-image-resizer:latest`
+
+The Docker image will be automatically rebuilt on the next resize operation.
 
 ## Limitations
 
