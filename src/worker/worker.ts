@@ -186,8 +186,8 @@ async function run(exe: Executor) {
     // Overlap-safe copy: compare ranges
     const overlaps = rootNewStart <= oldEnd && (rootNewStart + sizeSectors - 1) >= oldStart;
     if (overlaps) {
-      // Backward copy in chunks
-      const block = 128; // sectors per chunk
+      // Backward copy in larger chunks for speed (8192 sectors ≈ 4MB)
+      const block = 8192; // sectors per chunk
       let remain = sizeSectors;
       let progress = 0;
       while (remain > 0) {
@@ -195,12 +195,27 @@ async function run(exe: Executor) {
         const offFromEnd = progress + cur;
         const srcStart = oldEnd - offFromEnd + 1;
         const dstStart = rootNewStart + (srcStart - oldStart);
-        await exe.run(["dd", "if=" + loop, "of=" + loop, "bs=512", `skip=${srcStart}`, `seek=${dstStart}`, `count=${cur}`, "conv=notrunc"], { allowNonZeroExit: false });
+        await exe.run([
+          "dd",
+          "if=" + loop,
+          "of=" + loop,
+          "bs=512",
+          `skip=${srcStart}`,
+          `seek=${dstStart}`,
+          `count=${cur}`,
+          "conv=notrunc",
+          "iflag=direct",
+          "oflag=direct"
+        ], { allowNonZeroExit: false });
         progress += cur;
         remain -= cur;
+        if (progress % (block * 16) === 0) {
+          const mbDone = Math.floor(progress * 512 / 1024 / 1024);
+          INFO(`Moving root: ${mbDone}MB copied...`);
+        }
       }
     } else {
-      await exe.run(["dd", "if=" + loop, "of=" + loop, "bs=512", `skip=${oldStart}`, `seek=${rootNewStart}`, `count=${sizeSectors}`, "conv=notrunc", "status=progress"]);
+      await exe.run(["dd", "if=" + loop, "of=" + loop, "bs=4M", `skip=${oldStart}`, `seek=${rootNewStart}`, `count=${Math.ceil(sizeSectors / (4 * 1024 * 1024 / 512))}`, "conv=notrunc", "status=progress", "iflag=direct", "oflag=direct"]);
     }
 
     // Rewrite table with moved root
