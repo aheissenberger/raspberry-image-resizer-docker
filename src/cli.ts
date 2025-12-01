@@ -308,6 +308,7 @@ async function main() {
         image: dockerImage,
         workdir: workDir,
         env,
+        stream: true,
       });
       process.exitCode = result.code;
       if (result.code !== 0) throw new Error(`Worker failed: ${result.code}`);

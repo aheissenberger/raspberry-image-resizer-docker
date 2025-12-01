@@ -9,6 +9,7 @@ export type DockerRunOptions = {
   env?: Record<string, string | number | boolean | undefined>;
   privileged?: boolean;
   entry?: string[]; // override entrypoint/cmd
+  stream?: boolean; // stream docker stdout/stderr to console
 };
 
 /**
@@ -61,5 +62,9 @@ export async function runWorker(exe: Executor, opts: DockerRunOptions) {
   }
   args.push(opts.image);
   if (opts.entry && opts.entry.length) args.push(...opts.entry);
-  return exe.run(args, { cwd: opts.workdir });
+  return exe.run(args, {
+    cwd: opts.workdir,
+    onStdoutChunk: opts.stream ? (s) => process.stdout.write(s) : undefined,
+    onStderrChunk: opts.stream ? (s) => process.stderr.write(s) : undefined,
+  });
 }
