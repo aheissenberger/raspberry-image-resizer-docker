@@ -18,6 +18,7 @@ async function run(exe: Executor) {
   const IMAGE_SIZE = env("IMAGE_SIZE");
   const UNSAFE = env("UNSAFE_RESIZE_EXT4") === "1";
   const FAST_MOVE = env("FAST_MOVE") === "1";
+  const VERBOSE_ENV = env("VERBOSE");
 
   const imagePath = `/work/${IMAGE_FILE}`;
 
@@ -32,6 +33,11 @@ async function run(exe: Executor) {
   if (IMAGE_SIZE) INFO(`Target image size: ${IMAGE_SIZE}`);
   if (UNSAFE) WARN("Unsafe ext4 resizing enabled");
   if (DRY) WARN("DRY RUN mode active");
+  if (VERBOSE_ENV === "") {
+    WARN("VERBOSE not set; defaulting to non-verbose output");
+  } else {
+    INFO(`Verbose mode: ${VERBOSE_ENV === "1" ? "enabled" : "disabled"}`);
+  }
 
   // Step 0: Adjust image size if requested
   let imageExpanded = false, imageShrunk = false;
@@ -372,49 +378,48 @@ async function run(exe: Executor) {
   // Step 10: Final verification
   INFO("Step 10: Final verification...");
   if (!DRY) {
-    const finalDumpRes = await exe.run(["sfdisk", "-d", loop], { allowNonZeroExit: true });
-    const finalDump = finalDumpRes.stdout;
     await exe.run(["blkid", bootPart, rootPart], { allowNonZeroExit: true });
-    
+
+    // Verbose summary (human readable partition and image sizes) BEFORE detaching loop
+    if (VERBOSE_ENV === "1") {
+      try {
+        const dumpTxtRes = await exe.run(["sfdisk", "-d", loop], { allowNonZeroExit: true });
+        const dumpTxt = dumpTxtRes.stdout;
+        const sectorSize = 512;
+        const toMB = (bytes: number) => (bytes / 1024 / 1024).toFixed(2);
+        const toGB = (bytes: number) => (bytes / 1024 / 1024 / 1024).toFixed(2);
+        const imageBytes = Bun.file(imagePath).size;
+        const imageMB = toMB(imageBytes);
+        const imageGB = toGB(imageBytes);
+        console.log("[SUMMARY] Final Partition Layout:");
+        const lines = dumpTxt.split("\n");
+        const base = loop.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        for (const line of lines) {
+          const m = line.match(new RegExp(`^${base}p(\\d+)\\s*:\\s*(.*)$`));
+          if (m) {
+            const partNum = m[1];
+            const startMatch = line.match(/start=\s*(\d+)/);
+            const sizeMatch = line.match(/size=\s*(\d+)/);
+            const typeMatch = line.match(/type=([0-9a-fA-Fx]+)/);
+            if (startMatch && sizeMatch) {
+              const start = Number(startMatch[1]);
+              const sizeSectors = Number(sizeMatch[1]);
+              const end = start + sizeSectors - 1;
+              const bytes = sizeSectors * sectorSize;
+              console.log(`[SUMMARY] p${partNum}: start=${start} end=${end} sectors=${sizeSectors} sizeMB=${toMB(bytes)} sizeGB=${toGB(bytes)}${typeMatch ? ` type=${typeMatch[1]}` : ""}`);
+            }
+          }
+        }
+        console.log(`[SUMMARY] Image Size: ${imageBytes} bytes (${imageMB} MB / ${imageGB} GB)`);
+        console.log(`[SUMMARY] Image Path (container): ${imagePath}`);
+      } catch (e) {
+        WARN(`Unable to produce verbose summary: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
     // Cleanup: detach loop device
     await exe.run(["kpartx", "-d", loop], { allowNonZeroExit: true });
     await exe.run(["losetup", "-d", loop], { allowNonZeroExit: true });
-  }
-
-  // Verbose summary (human readable partition and image sizes)
-  if (env("VERBOSE") === "1" && !DRY) {
-    try {
-      const dumpTxt = await exe.run(["sfdisk", "-d", loop]).then(r => r.stdout);
-      const sectorSize = 512;
-      const toMB = (bytes: number) => (bytes / 1024 / 1024).toFixed(2);
-      const toGB = (bytes: number) => (bytes / 1024 / 1024 / 1024).toFixed(2);
-      const imageBytes = Bun.file(imagePath).size;
-      const imageMB = toMB(imageBytes);
-      const imageGB = toGB(imageBytes);
-      console.log("[SUMMARY] Final Partition Layout:");
-      const lines = dumpTxt.split("\n");
-      const base = loop.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      for (const line of lines) {
-        const m = line.match(new RegExp(`^${base}p(\\d+)\\s*:\\s*(.*)$`));
-        if (m) {
-          const partNum = m[1];
-          const startMatch = line.match(/start=\s*(\d+)/);
-          const sizeMatch = line.match(/size=\s*(\d+)/);
-          const typeMatch = line.match(/type=([0-9a-fA-Fx]+)/);
-          if (startMatch && sizeMatch) {
-            const start = Number(startMatch[1]);
-            const sizeSectors = Number(sizeMatch[1]);
-            const end = start + sizeSectors - 1;
-            const bytes = sizeSectors * sectorSize;
-            console.log(`[SUMMARY] p${partNum}: start=${start} end=${end} sectors=${sizeSectors} sizeMB=${toMB(bytes)} sizeGB=${toGB(bytes)}${typeMatch ? ` type=${typeMatch[1]}` : ""}`);
-          }
-        }
-      }
-      console.log(`[SUMMARY] Image Size: ${imageBytes} bytes (${imageMB} MB / ${imageGB} GB)`);
-      console.log(`[SUMMARY] Image Path (container): ${imagePath}`);
-    } catch (e) {
-      WARN(`Unable to produce verbose summary: ${e instanceof Error ? e.message : String(e)}`);
-    }
   }
 
   INFO("=== Operation completed successfully ===");
