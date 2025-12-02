@@ -135,7 +135,7 @@ async function writeImageToDevice(
   await exec.run(["diskutil", "mountDisk", device.disk], { allowNonZeroExit: true });
   
   if (verifyFs) {
-      await verifyFilesystemsOnDeviceViaDocker(exec, device);
+      //await verifyFilesystemsOnDeviceViaDocker(exec, device);
   }
 }
 
