@@ -461,7 +461,7 @@ async function main() {
     }
 
     // Compute default image size from target device if not provided
-    const devSizeBytes = await getDiskSizeBytes(exec, selected);
+    const devSizeBytes = await getDiskSizeBytes(exec, device.disk);
     const safeBytes = Math.floor(devSizeBytes * 0.98); // 2% headroom
     const safeMB = Math.floor(safeBytes / 1024 / 1024);
     const chosenImageSize = (args["image-size"] as string | undefined) ?? `${safeMB}MB`;
