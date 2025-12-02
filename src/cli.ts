@@ -18,6 +18,7 @@ function usage() {
   `  size                       Show size of removable device (macOS)\n\n` +
 `Global Options:\n  -h, --help                 Show help\n  -v, --version              Show version\n\n` +
   `Clone/Write/Size Options:\n  --compress <zstd|xz|gzip>  Compress output during clone\n  --level <n>                Compression level\n  --block-size <SIZE>        dd block size (default 4m)\n  --device </dev/diskN>      Override auto-detect; use specific disk (advanced)\n  --yes                      Skip confirmations (write only; dangerous)\n  --preview                  Print the dd command and exit (no changes)\n\n` +
+    `  --verbose                  Print duration summary after completion\n\n` +
 `Resize Options:\n  --boot-size <MB>           Target boot partition size (default 256)\n  --image-size <SIZE>        Change overall image size (e.g. 32GB, 8192MB)\n  --unsafe-resize-ext4       Run resize2fs on root when not moving (unsafe)\n  --dry-run                  Plan only, do not modify\n  --verbose                  Verbose logs\n  --docker-image <name>      Docker image name (default rpi-image-resizer:latest)\n  --work-dir <path>          Working directory for temp files (default: TMPDIR or /tmp for compressed)\n`);
 }
 
@@ -160,7 +161,8 @@ async function main() {
 
   if (command === "write") {
     const { args, positional } = parseArgs(rest, [
-      { name: "device", type: "string" } // optional explicit device: /dev/diskN
+      { name: "device", type: "string" }, // optional explicit device: /dev/diskN
+      { name: "block-size", type: "string" }
     ]);
     const image = positional[0];
     if (!image) throw new Error("Missing <image>");
@@ -182,6 +184,9 @@ async function main() {
     const algo = detectCompressionByExt(image);
     const decomp = algo ? buildDecompressor(algo) : undefined;
 
+    // Resolve block size (default 4m)
+    const bs = resolveBlockSize(args["block-size"] as string | undefined);
+
     // Preflight: if image is uncompressed, ensure device capacity >= image size
     if (!decomp) {
       const imgSize = Bun.file(image).size;
@@ -202,12 +207,12 @@ async function main() {
 
     // dd command with conv=fsync to flush writes
     if (decomp) {
-      const cmd = `${decomp.join(" ")} ${escapePath(image)} | sudo dd of=${raw} bs=4m conv=fsync status=progress`;
+      const cmd = `${decomp.join(" ")} ${escapePath(image)} | sudo dd of=${raw} bs=${bs} conv=fsync status=progress`;
       console.log(`About to WRITE image to device: ${selected} (raw ${raw})`);
       await exec.run(["bash", "-lc", cmd], { onStderrChunk: (s) => process.stderr.write(s) });
     } else {
       console.log(`About to WRITE image to device: ${selected} (raw ${raw})`);
-      await exec.run(["bash", "-lc", `sudo dd if=${escapePath(image)} of=${raw} bs=4m conv=fsync status=progress`], { onStderrChunk: (s) => process.stderr.write(s) });
+      await exec.run(["bash", "-lc", `sudo dd if=${escapePath(image)} of=${raw} bs=${bs} conv=fsync status=progress`], { onStderrChunk: (s) => process.stderr.write(s) });
     }
 
     await exec.run(["sync"], { allowNonZeroExit: true });
