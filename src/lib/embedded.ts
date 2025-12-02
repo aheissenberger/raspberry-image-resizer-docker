@@ -32,6 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
     kpartx \\
     e2fsprogs \\
     dosfstools \\
+    nbd-client \\
     rsync \\
     zstd \\
     xz-utils \\

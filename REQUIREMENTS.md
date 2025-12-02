@@ -1,6 +1,6 @@
 # Raspberry Pi Image Resizer (Docker-Based) — Requirements Document
 
-**Version:** 1.3  
+**Version:** 1.4  
 **Date:** 2025-12-02  
 **Author:** ChatGPT  
 
@@ -11,7 +11,7 @@ This document defines the functional and non-functional requirements for a Docke
 
 The goal of this project is to provide a **cross‑platform, safe, reproducible** solution for resizing and modifying Raspberry Pi `.img` files using **Linux tools executed inside a Docker container**, while the host system (macOS) simply supplies the image file.
 
-Host orchestration is implemented in **Bun + TypeScript** for testability and maintainability.
+Host orchestration is implemented in **TypeScript** and distributed as a prebuilt single binary for macOS (no Bun runtime required for end users). Development uses Bun; releases ship compiled binaries.
 
 This approach ensures:
 - No need for a full Linux VM.
@@ -50,14 +50,14 @@ The Docker‑based solution shall:
 
 ## 3. Technical Architecture
 
-- **CLI**: TypeScript-based command-line interface compiled to native executable (`dist/rpi-tool`, 57MB)
+- **CLI**: TypeScript-based command-line interface compiled to native executable (`rpi-tool`, ~57MB)
   - **Self-contained binary**: Embeds Dockerfile and worker.js at compile time
   - **Auto-build capability**: Automatically builds Docker image on first run if not present
   - **No manual Docker build required**: Users only need Docker Desktop running
 - **Worker**: TypeScript resize logic (`src/worker/worker.ts`) compiled to JavaScript and executed in Docker
 - **Embedded Resources** (`src/lib/embedded.ts`): Contains Dockerfile and worker.js as compile-time constants
 - **Test Infrastructure**: TypeScript test harness (`src/test-helper.ts`) for E2E testing
-- **Docker Container**: Ubuntu 24.04 with Bun runtime and Linux partition tools
+- **Docker Container**: Ubuntu 24.04 with Bun runtime and Linux partition tools; includes `nbd-client` to support post-write verification via NBD bridge.
 
 ---
 
@@ -352,6 +352,19 @@ The Linux container provides full capabilities for:
 
 ### **FR-9: Final Verification (Optional)**
 Before cleanup, the system may optionally verify the filesystem:
+### **FR-9b: Post-Write Verification on Physical SD (macOS host)**
+When `--verify-fs` is used after writing an image to an SD card on macOS, verification runs inside Docker by bridging the physical device via NBD:
+
+- Requires `nbdkit` on the macOS host: `brew install nbdkit`
+- The host exports the raw device (`/dev/rdiskX`) read-only using `nbdkit --exit-with-parent file file=/dev/rdiskX -p <port>`
+- The container connects with `nbd-client` to `host.docker.internal:<port>`
+- Partitions are probed (`partprobe`, `kpartx`) and verified:
+  - Boot (FAT): `fsck.vfat -n`
+  - Root (ext4): `e2fsck -f -n`
+- Exit codes are interpreted; uncorrected inconsistencies (e.g., free blocks/inodes count wrong) report warnings (code 4) but are not repaired in read-only mode.
+- Device is unmounted before verification and remounted afterwards for convenience.
+
+This design avoids macOS ext4 tooling limitations while ensuring checks run with Linux tooling inside Docker.
 
 **Step 10b: Final Read-Only Filesystem Check**
 - Triggered when `--verify-fs` flag set OR `--verbose` enabled

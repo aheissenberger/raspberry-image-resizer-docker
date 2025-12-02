@@ -11,6 +11,7 @@ class RpiImageResizer < Formula
     sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   end
 
+  depends_on "nbdkit"
   depends_on "docker" => :recommended
 
   def install

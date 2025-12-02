@@ -113,7 +113,8 @@ async function writeImageToDevice(
   device: { disk: string; rdisk: string },
   blockSize: string,
   decompressor?: string[],
-  verifyFs?: boolean
+  verifyFs?: boolean,
+  dockerImage?: string
 ): Promise<void> {
   // Proactively request sudo to avoid pause when dd starts
   await exec.run(["sudo", "-v"], { allowNonZeroExit: true });
@@ -135,110 +136,135 @@ async function writeImageToDevice(
   await exec.run(["diskutil", "mountDisk", device.disk], { allowNonZeroExit: true });
   
   if (verifyFs) {
-      await verifyFilesystemsOnDeviceViaDocker(exec, device);
+      await verifyFilesystemsOnDeviceViaDocker(exec, device, dockerImage);
   }
 }
 
-  // Shared utility: verify filesystems on device after write (Docker-based)
+  // Shared utility: verify filesystems on device after write (Docker-based via NBD bridge)
   async function verifyFilesystemsOnDeviceViaDocker(
     exec: BunExecutor,
-    device: { disk: string; rdisk: string }
+    device: { disk: string; rdisk: string },
+    dockerImage?: string
   ): Promise<void> {
     console.log("\n[VERIFY] Running filesystem checks on written device via Docker container...");
-  
-    // Unmount device on macOS before Docker access
+
+    // Unmount device on macOS before verification (fsck should run on unmounted filesystems)
     await exec.run(["diskutil", "unmountDisk", device.disk], { allowNonZeroExit: true });
-  
+
+    // Ensure docker image exists (use local resizer image by default)
+    const imageName = dockerImage || "rpi-image-resizer:latest";
+    await ensureImage(exec, imageName);
+
+    // Locate nbdkit on macOS host
+    const which = await exec.run(["bash", "-lc", "command -v nbdkit || true"], { allowNonZeroExit: true });
+    const nbdkitPath = which.stdout.trim();
+    if (!nbdkitPath) {
+      throw new Error("nbdkit not found. Install it via 'brew install nbdkit' to enable Docker-based verification.");
+    }
+
+    // Choose a port for NBD server and start it (read-only, exit-with-parent)
+    const port = 10809 + Math.floor(Math.random() * 5000);
+    console.log(`[VERIFY] Starting NBD server on host for ${device.rdisk} (port ${port})...`);
+    const server = spawn({
+      cmd: [
+        "bash",
+        "-lc",
+        `sudo ${nbdkitPath} -r --exit-with-parent file file=${device.rdisk} -p ${port}`
+      ],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    // Give server time to start
+    await new Promise((r) => setTimeout(r, 1000));
+
+    // Build verification script executed inside container
+    const verifyScript = `#!/bin/bash
+set -e
+HOST_ADDR="host.docker.internal"
+PORT="${port}"
+NBD_DEV="/dev/nbd0"
+
+echo "[VERIFY] Connecting to NBD ${'$'}{HOST_ADDR}:${'$'}{PORT} -> ${'$'}{NBD_DEV}"
+nbd-client "${'$'}{HOST_ADDR}" "${'$'}{PORT}" "${'$'}{NBD_DEV}"
+
+echo "[VERIFY] Probing partitions..."
+partprobe "${'$'}{NBD_DEV}" || true
+kpartx -av "${'$'}{NBD_DEV}" || true
+
+# Prefer mapper devices if present
+BOOT_DEV="${'$'}{NBD_DEV}p1"
+ROOT_DEV="${'$'}{NBD_DEV}p2"
+if [ -e "/dev/mapper/nbd0p1" ]; then BOOT_DEV="/dev/mapper/nbd0p1"; fi
+if [ -e "/dev/mapper/nbd0p2" ]; then ROOT_DEV="/dev/mapper/nbd0p2"; fi
+
+echo "[VERIFY] Boot device: ${'$'}{BOOT_DEV}"
+echo "[VERIFY] Root device: ${'$'}{ROOT_DEV}"
+
+echo "[VERIFY] Checking boot partition (FAT)..."
+fsck.vfat -n "${'$'}{BOOT_DEV}"
+BOOT_CODE=${'$'}?
+if [ ${'$'}BOOT_CODE -eq 0 ]; then
+  echo "[VERIFY] ✓ Boot partition (FAT): clean"
+elif [ ${'$'}BOOT_CODE -eq 1 ]; then
+  echo "[VERIFY] ✓ Boot partition (FAT): minor issues (check reports)"
+else
+  echo "[VERIFY] ✗ Boot partition (FAT): errors detected (code ${'$'}BOOT_CODE)"
+fi
+
+echo "[VERIFY] Checking root partition (ext4)..."
+e2fsck -f -n "${'$'}{ROOT_DEV}"
+EXT4_CODE=${'$'}?
+if [ ${'$'}EXT4_CODE -ge 8 ]; then
+  echo "[VERIFY] ✗ Root partition (ext4): fatal/operational error (code ${'$'}EXT4_CODE)"
+  EXITCODE=1
+elif [ ${'$'}EXT4_CODE -eq 4 ]; then
+  echo "[VERIFY] ⚠ Root partition (ext4): uncorrected errors (read-only check)"
+  EXITCODE=4
+elif [ ${'$'}EXT4_CODE -eq 2 ]; then
+  echo "[VERIFY] ⚠ Root partition (ext4): reboot requested"
+  EXITCODE=0
+elif [ ${'$'}EXT4_CODE -eq 1 ]; then
+  echo "[VERIFY] ✓ Root partition (ext4): issues would be corrected in repair mode"
+  EXITCODE=0
+else
+  echo "[VERIFY] ✓ Root partition (ext4): clean"
+  EXITCODE=0
+fi
+
+echo "[VERIFY] Disconnecting NBD..."
+nbd-client -d "${'$'}{NBD_DEV}" || true
+exit ${'$'}{EXITCODE}
+`;
+
+    // Write script to a temp file and run in container
+    const scriptPath = `/tmp/verify-fs-${Date.now()}.sh`;
+    await Bun.write(scriptPath, verifyScript);
+    await exec.run(["chmod", "+x", scriptPath]);
+
     try {
-      // Create verification script that will run inside Docker container
-      const verifyScript = `#!/bin/bash
-  set -e
-  DEVICE="$1"
-
-  echo "[VERIFY] Attaching device in container: \${DEVICE}"
-
-  # Check FAT filesystem on partition 1 (boot)
-  echo "[VERIFY] Checking boot partition (FAT)..."
-  if fsck.vfat -n "\${DEVICE}1" 2>&1; then
-    BOOT_CODE=$?
-    if [ $BOOT_CODE -eq 0 ]; then
-      echo "[VERIFY] ✓ Boot partition (FAT): clean"
-    elif [ $BOOT_CODE -eq 1 ]; then
-      echo "[VERIFY] ✓ Boot partition (FAT): clean (minor issues corrected in check)"
-    else
-      echo "[VERIFY] ✗ Boot partition (FAT): errors detected (code $BOOT_CODE)"
-      exit 1
-    fi
-  else
-    BOOT_CODE=$?
-    echo "[VERIFY] ✗ Boot partition (FAT): check failed with code $BOOT_CODE"
-    exit 1
-  fi
-
-  # Check ext4 filesystem on partition 2 (root)
-  echo "[VERIFY] Checking root partition (ext4)..."
-  if e2fsck -n -f "\${DEVICE}2" 2>&1; then
-    EXT4_CODE=$?
-    if [ $EXT4_CODE -eq 0 ]; then
-      echo "[VERIFY] ✓ Root partition (ext4): clean"
-    elif [ $EXT4_CODE -eq 1 ]; then
-      echo "[VERIFY] ✓ Root partition (ext4): clean (issues corrected in check)"
-    elif [ $EXT4_CODE -eq 4 ]; then
-      echo "[VERIFY] ⚠ Root partition (ext4): uncorrected errors (read-only check)"
-    elif [ $EXT4_CODE -ge 8 ]; then
-      echo "[VERIFY] ✗ Root partition (ext4): fatal errors (code $EXT4_CODE)"
-      exit 1
-    else
-      echo "[VERIFY] ⚠ Root partition (ext4): check returned code $EXT4_CODE"
-    fi
-  else
-    EXT4_CODE=$?
-    if [ $EXT4_CODE -ge 8 ]; then
-      echo "[VERIFY] ✗ Root partition (ext4): check failed with code $EXT4_CODE"
-      exit 1
-    elif [ $EXT4_CODE -eq 4 ]; then
-      echo "[VERIFY] ⚠ Root partition (ext4): uncorrected errors (read-only check)"
-    else
-      echo "[VERIFY] ⚠ Root partition (ext4): check returned code $EXT4_CODE"
-    fi
-  fi
-
-  echo "[VERIFY] Filesystem verification completed"
-  `;
-
-      // Write script to temp file
-      const scriptPath = `/tmp/verify-fs-${Date.now()}.sh`;
-      await Bun.write(scriptPath, verifyScript);
-      await exec.run(["chmod", "+x", scriptPath]);
-
-      // Run Docker container with privileged mode to access device
-      const dockerImage = "ghcr.io/andihofmeister/raspberry-pi-image-resizer:latest";
-      const dockerArgs = [
-        "run",
-        "--rm",
-        "--privileged",
+      console.log(`[VERIFY] Running Docker verification using image ${imageName}...`);
+      const result = await exec.run([
+        "docker", "run", "--rm", "--privileged",
         "-v", `${scriptPath}:/verify.sh`,
-        dockerImage,
-        "/verify.sh",
-        device.disk
-      ];
-
-      console.log(`[VERIFY] Running Docker verification with device ${device.disk}...`);
-      const result = await exec.run(["docker", ...dockerArgs], { allowNonZeroExit: true });
-    
-      // Clean up script
-      await exec.run(["rm", scriptPath], { allowNonZeroExit: true });
+        imageName,
+        "bash", "-lc", "/verify.sh"
+      ], { allowNonZeroExit: true });
 
       if (result.code !== 0) {
-        console.error("[VERIFY] Filesystem verification failed");
-        console.error(result.stdout);
-        console.error(result.stderr);
+        console.error("[VERIFY] Filesystem verification reported issues or failed");
+        if (result.stdout) process.stdout.write(result.stdout);
+        if (result.stderr) process.stderr.write(result.stderr);
         throw new Error(`Filesystem verification failed with exit code ${result.code}`);
       }
 
-      console.log("[VERIFY] All filesystem checks passed\n");
+      console.log("[VERIFY] ✓ Filesystem verification completed successfully\n");
     } finally {
-      // Always remount after checks
+      // Cleanup script and stop nbdkit server
+      await exec.run(["rm", scriptPath], { allowNonZeroExit: true });
+      try {
+        server.kill();
+      } catch {}
+      // Remount the device again for user convenience
       await exec.run(["diskutil", "mountDisk", device.disk], { allowNonZeroExit: true });
     }
   }
@@ -396,7 +422,7 @@ async function main() {
     const verifyFs = args["verify-fs"] || argv.includes("--verbose");
 
     await preflightImageSize(exec, image, device.disk, !!algo);
-    await writeImageToDevice(exec, image, device, bs, decomp, verifyFs);
+    await writeImageToDevice(exec, image, device, bs, decomp, verifyFs, "rpi-image-resizer:latest");
     
     console.log("✓ Write completed");
     if (argv.includes("--verbose")) {
@@ -516,7 +542,7 @@ async function main() {
     }
 
     const verifyFs = args["verify-fs"] || args["verbose"];
-    await writeImageToDevice(exec, finalPath, device, bs, undefined, verifyFs);
+    await writeImageToDevice(exec, finalPath, device, bs, undefined, verifyFs, dockerImage);
     console.log("✓ Deploy completed (resize + write)");
     
     // Cleanup: delete working image unless --keep-working
