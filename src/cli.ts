@@ -306,13 +306,28 @@ async function main() {
       // Ensure Docker image exists (will auto-build from embedded resources if needed)
       await ensureImage(exec, dockerImage);
 
-      const result = await runWorker(exec, {
+      // First attempt: fast-move by default (unless --dd-move provided)
+      let result = await runWorker(exec, {
         image: dockerImage,
         workdir: workDir,
         env,
         stream: true,
       });
       process.exitCode = result.code;
+
+      // Fallback automatically to dd-move if fast path fails and user didn't force dd
+      if (result.code !== 0 && env.FAST_MOVE === "1" && !args["dd-move"]) {
+        console.warn("[WARN] Worker failed during fast move. Retrying with dd-move (slower, more compatible)...");
+        const fallbackEnv = { ...env, FAST_MOVE: "0" };
+        result = await runWorker(exec, {
+          image: dockerImage,
+          workdir: workDir,
+          env: fallbackEnv,
+          stream: true,
+        });
+        process.exitCode = result.code;
+      }
+
       if (result.code !== 0) throw new Error(`Worker failed: ${result.code}`);
       if (args["verbose"]) {
         if (!args["dry-run"]) {
