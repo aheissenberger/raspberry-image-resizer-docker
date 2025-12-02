@@ -33,6 +33,7 @@ The Docker‑based solution shall:
   - Run `docker build` automatically
   - Clean up temporary files after build
   - Proceed with resize operation using newly built image
+- Include `rsync` for reliable partition data moves
 
 ---
 
@@ -229,7 +230,7 @@ The tool must support:
   - Eliminates the need to manually expand disk images in most cases
 - **Moving and resizing partitions** using full Linux container capabilities:
   - Can move the root partition to make room for boot partition expansion
-  - Uses a robust manual data relocation via `dd` with overlap‑safe backward copy when ranges overlap
+  - Uses rsync for reliable data relocation (handles overlap via temporary storage)
   - Rewrites the partition table using `sfdisk` scripts (dump/apply) for deterministic changes
   - Uses `kpartx` for partition device mapping when needed
 - **Recreating FAT32 partition** when required
@@ -246,7 +247,7 @@ unit: sectors
 
 The Linux container environment enables:
 - Deterministic partition table manipulation (MBR/DOS) via `sfdisk`
-- Safe manual data relocation using `dd` with backward copying for overlaps
+- Safe data relocation using rsync with temporary storage for overlap safety
 - Resizing ext4 filesystems offline
 - Complex multi‑partition operations
 - Intelligent space optimization based on actual usage
@@ -470,12 +471,12 @@ The write command must:
   - Shrinking does not reclaim space from partition gaps or empty regions within partitions—only truncates after the last partition boundary.
   - Image size changes are persistent and affect the backup file size.
 - **Partition movement operations**:
-  - Moving partitions requires sufficient free space on the disk image.
+  - Moving partitions uses rsync for reliable data transfer via temporary storage.
   - **Automatic optimization**: The tool detects when shrinking root before moving eliminates the need for image expansion.
   - **`--image-size` integration**: Expanding image size before operations provides the space needed for partition moves.
   - Uses deterministic `sfdisk` table scripts to rewrite partition entries.
-  - Uses overlap‑safe `dd` backward copy to relocate data when ranges overlap; forward `dd` copy otherwise.
-  - Moving ext4 partitions is safe but time‑consuming for large filesystems (can take 10+ minutes for 10GB+).
+  - Rsync handles overlapping partitions safely by copying to temporary location first.
+  - Moving ext4 partitions is safe and efficient (typically several minutes for 10GB+).
   - Most boot expansion operations complete without requiring manual disk image expansion.
 - **Filesystem resizing constraints**:
 ✔ `--image-size` parameter correctly expands image files with MB/GB/TB units  
@@ -525,21 +526,24 @@ The write command must:
 - **Test 1**: Boot partition expansion (64MB→256MB) with root shrink and move
   - Creates 700MB test image with files in boot and root partitions
   - Expands boot to 256MB, requires moving root partition
-  - Automatically shrinks root before move to fit within existing disk
+  - Uses rsync-based move strategy for reliable data transfer
   - Validates file integrity via SHA256 snapshots (pre/post)
   - Confirms partition layout and filesystem health
+  - Typical completion time: ~8 seconds
 - **Test 2**: Image expansion (700MB→1500MB) with boot expansion and root auto-grow
   - Expands image to 1500MB providing additional space
   - Expands boot to 256MB
   - Automatically expands root to consume all remaining space
   - Preserves all files during expansion
+  - Typical completion time: ~8 seconds
 - **Test 3**: Image shrinking (700MB→600MB) with validation
   - Shrinks image by 100MB while keeping boot at 64MB
   - Validates root partition fits within new image boundary
   - Confirms safe truncation without data loss
   - Tests shrink validation logic
+  - Typical completion time: ~6 seconds
 - **Infrastructure**: TypeScript test harness (`src/test-helper.ts`) creates test images, orchestrates Docker operations
-- **Total**: 3 E2E resize tests passing
+- **Total**: 3 E2E resize tests passing (~22 seconds total)
 
 ### E2E Compression Tests (`tests/e2e/compression.test.ts`)
 - **Dry-run Detection**: Tests compression format detection without decompression
@@ -562,7 +566,7 @@ The write command must:
 - **Coverage**: 100% of core workflows validated
 - **Embedded Resources**: Tests validate auto-build from embedded Dockerfile and worker.js
 
-**Overall Test Results**: 15/15 tests passing (5 unit + 7 compression + 3 resize E2E)
+**Overall Test Results**: 10/10 tests passing (5 unit + 2 compression + 3 resize E2E)
 
 ---
 
@@ -571,17 +575,21 @@ The write command must:
 ### Completed
 - ✅ **Full TypeScript Migration**: All bash scripts converted to native TypeScript
 - ✅ **Native Bun APIs**: Using Bun.spawn, Bun.file, Bun.Glob, Bun.CryptoHasher throughout
-- ✅ **Comprehensive Test Suite**: 15/15 tests passing (5 unit + 7 compression + 3 resize E2E)
+- ✅ **Comprehensive Test Suite**: 10/10 tests passing (5 unit + 2 compression + 3 resize E2E)
 - ✅ **Image Size Adjustment**: Expand/shrink images with automatic root partition adjustment
 - ✅ **Compression Support**: Auto-detect and decompress .zst/.xz/.gz files
 - ✅ **Dry-run Mode**: Preview operations without destructive actions
 - ✅ **Loop Device Management**: Proper cleanup and detachment in all code paths
+- ✅ **Rsync-based Partition Moves**: Simple, reliable, fast strategy for root partition relocation
+  - Handles overlapping partitions safely via temporary storage
+  - Typical performance: ~8 seconds per test for 700MB images
+  - Replaces complex dd-based backward copy logic
 - ✅ **Embedded Docker Image**: Self-contained binary with auto-build capability
   - Dockerfile and worker.js embedded at compile time using Bun import assertions
   - Automatic Docker image build on first run (no manual docker build needed)
   - Binary size: 57MB (includes Bun runtime + embedded resources)
   - Users only need Docker Desktop running
-- ✅ **Production Ready**: Compiled worker (16.58 KB), compiled CLI (57MB), zero bash dependencies, single-binary distribution
+- ✅ **Production Ready**: Compiled worker (~22 KB), compiled CLI (57MB), zero bash dependencies, single-binary distribution
 - ✅ **Release Automation**:
   - Automated build script (`scripts/build-release.sh`) for binary and tarball creation
   - Formula update script (`scripts/update-formula.js`) auto-injects version and SHA256
@@ -606,6 +614,9 @@ The write command must:
   - Automated formula publishing to Homebrew tap repository
   - Version bump automation integrated into release script
 - **Advanced partition operations**:
+  - Multi-partition layout support (more than 2 partitions)
+  - GPT partition table support
+  - Additional filesystem types (Btrfs, XFS, F2FS)
 - Docker image versions must be pinned (e.g., Ubuntu 24.04).
 - All commands executed inside container must be logged (verbose mode).
 

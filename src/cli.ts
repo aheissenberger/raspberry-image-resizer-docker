@@ -18,7 +18,7 @@ function usage() {
   `  size                       Show size of removable device (macOS)\n\n` +
 `Global Options:\n  -h, --help                 Show help\n  -v, --version              Show version\n\n` +
   `Clone/Write/Size Options:\n  --compress <zstd|xz|gzip>  Compress output during clone\n  --level <n>                Compression level\n  --block-size <SIZE>        dd block size (default 4m)\n  --device </dev/diskN>      Override auto-detect; use specific disk (advanced)\n  --yes                      Skip confirmations (write only; dangerous)\n  --preview                  Print the dd command and exit (no changes)\n\n` +
-`Resize Options:\n  --boot-size <MB>           Target boot partition size (default 256)\n  --image-size <SIZE>        Change overall image size (e.g. 32GB, 8192MB)\n  --unsafe-resize-ext4       Run resize2fs on root when not moving (unsafe)\n  --dd-move                  Use dd for root move instead of fast partclone (default is fast)\n  --dry-run                  Plan only, do not modify\n  --verbose                  Verbose logs\n  --docker-image <name>      Docker image name (default rpi-image-resizer:latest)\n  --work-dir <path>          Working directory for temp files (default: TMPDIR or /tmp for compressed)\n`);
+`Resize Options:\n  --boot-size <MB>           Target boot partition size (default 256)\n  --image-size <SIZE>        Change overall image size (e.g. 32GB, 8192MB)\n  --unsafe-resize-ext4       Run resize2fs on root when not moving (unsafe)\n  --dry-run                  Plan only, do not modify\n  --verbose                  Verbose logs\n  --docker-image <name>      Docker image name (default rpi-image-resizer:latest)\n  --work-dir <path>          Working directory for temp files (default: TMPDIR or /tmp for compressed)\n`);
 }
 
 function escapePath(p: string) {
@@ -54,6 +54,23 @@ async function getDiskSizeBytes(exec: BunExecutor, disk: string): Promise<number
   }
 }
 
+function formatDuration(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  
+  if (hours > 0) {
+    const remainingMinutes = minutes % 60;
+    const remainingSeconds = seconds % 60;
+    return `${hours}h ${remainingMinutes}m ${remainingSeconds}s`;
+  } else if (minutes > 0) {
+    const remainingSeconds = seconds % 60;
+    return `${minutes}m ${remainingSeconds}s`;
+  } else {
+    return `${seconds}s`;
+  }
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   if (argv.includes("-h") || argv.includes("--help")) return usage();
@@ -64,6 +81,7 @@ async function main() {
   // Support `version` as a command
   if (command === "version") { console.log(VERSION); return; }
 
+  const startTime = Date.now();
   const exec = new BunExecutor();
 
   if (command === "clone") {
@@ -111,6 +129,10 @@ async function main() {
     await exec.run(["sync"], { allowNonZeroExit: true });
     await exec.run(["diskutil", "mountDisk", selected], { allowNonZeroExit: true });
     console.log("✓ Clone completed");
+    if (argv.includes("--verbose")) {
+      const duration = Date.now() - startTime;
+      console.log(`[DURATION] ${formatDuration(duration)}`);
+    }
     return;
   }
 
@@ -129,6 +151,10 @@ async function main() {
     console.log(`${selected}: ${bytesToGiB(sizeBytes)} (${sizeBytes} bytes)`);
     console.log(`Approx capacity: ${gb.toFixed(2)} GB`);
     console.log(`Recommended --image-size: ${safeGb.toFixed(1)}GB`);
+    if (argv.includes("--verbose")) {
+      const duration = Date.now() - startTime;
+      console.log(`[DURATION] ${formatDuration(duration)}`);
+    }
     return;
   }
 
@@ -187,6 +213,10 @@ async function main() {
     await exec.run(["sync"], { allowNonZeroExit: true });
     await exec.run(["diskutil", "mountDisk", selected], { allowNonZeroExit: true });
     console.log("✓ Write completed");
+    if (argv.includes("--verbose")) {
+      const duration = Date.now() - startTime;
+      console.log(`[DURATION] ${formatDuration(duration)}`);
+    }
     return;
   }
 
@@ -211,6 +241,10 @@ async function main() {
     }
 
     console.log("\n✓ Clean completed");
+    if (argv.includes("--verbose")) {
+      const duration = Date.now() - startTime;
+      console.log(`[DURATION] ${formatDuration(duration)}`);
+    }
     return;
   }
 
@@ -219,7 +253,6 @@ async function main() {
       { name: "boot-size", type: "number", default: 256 },
       { name: "image-size", type: "string" },
       { name: "unsafe-resize-ext4", type: "boolean" },
-      { name: "dd-move", type: "boolean" },
       { name: "dry-run", type: "boolean" },
       { name: "verbose", type: "boolean" },
       { name: "docker-image", type: "string" },
@@ -298,7 +331,6 @@ async function main() {
         BOOT_SIZE_MB: String(args["boot-size"] ?? 256),
         IMAGE_SIZE: args["image-size"] ? String(args["image-size"]) : "",
         UNSAFE_RESIZE_EXT4: args["unsafe-resize-ext4"] ? "1" : "0",
-        FAST_MOVE: args["dd-move"] ? "0" : "1",
         DRY_RUN: args["dry-run"] ? "1" : "0",
         VERBOSE: args["verbose"] ? "1" : "0",
       } as Record<string, string>;
@@ -306,27 +338,13 @@ async function main() {
       // Ensure Docker image exists (will auto-build from embedded resources if needed)
       await ensureImage(exec, dockerImage);
 
-      // First attempt: fast-move by default (unless --dd-move provided)
-      let result = await runWorker(exec, {
+      const result = await runWorker(exec, {
         image: dockerImage,
         workdir: workDir,
         env,
         stream: true,
       });
       process.exitCode = result.code;
-
-      // Fallback automatically to dd-move if fast path fails and user didn't force dd
-      if (result.code !== 0 && env.FAST_MOVE === "1" && !args["dd-move"]) {
-        console.warn("[WARN] Worker failed during fast move. Retrying with dd-move (slower, more compatible)...");
-        const fallbackEnv = { ...env, FAST_MOVE: "0" };
-        result = await runWorker(exec, {
-          image: dockerImage,
-          workdir: workDir,
-          env: fallbackEnv,
-          stream: true,
-        });
-        process.exitCode = result.code;
-      }
 
       if (result.code !== 0) throw new Error(`Worker failed: ${result.code}`);
       if (args["verbose"]) {
@@ -343,6 +361,10 @@ async function main() {
         }
       }
       console.log("✓ Resize completed");
+      if (args["verbose"]) {
+        const duration = Date.now() - startTime;
+        console.log(`[DURATION] ${formatDuration(duration)}`);
+      }
     } finally {
       // No temporary decompression file to clean; workingPath remains for user
     }

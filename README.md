@@ -275,7 +275,6 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 | `--boot-size <MB>` | Size for boot partition in MB | 256 |
 | `--image-size <size>` | Resize whole image (supports `MB`, `GB`, `TB`) | - |
 | `--unsafe-resize-ext4` | Enable ext4 root partition resizing | Disabled |
-| `--dd-move` | Force dd for root move (fallback path; default is fast) | Disabled |
 | `--dry-run` | Preview changes without modifying | Disabled |
 | `--verbose` | Show detailed output from Docker | Disabled |
 | `--work-dir <path>` | Working directory for temp files and working image | For compressed inputs: `$TMPDIR` or `/tmp`; otherwise source dir |
@@ -343,11 +342,11 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 2. **Docker Launch**: Starts privileged Linux container with image mounted
 3. **Loop Device**: Attaches image as `/dev/loop0` inside container
 4. **Partition Analysis**: Examines partition table and filesystems
-5. **Usage Detection**: Checks actual filesystem usage to determine if shrinking is beneficial
-6. **Automatic Shrinking**: Shrinks root filesystem and partition if needed (avoids disk expansion)
-7. **Boot Backup**: Copies all files from boot partition (FAT32)
-8. **Partition Moving**: Relocates root partition data with `partclone` by default (fast path, ext4 only); `dd` is used when forced or as fallback (overlap-safe backward copy)
-9. **Partition Resize**: Adjusts boot partition boundaries using `sfdisk` scripts
+6. **Usage Detection**: Checks actual filesystem usage to determine if shrinking is beneficial
+7. **Automatic Shrinking**: Shrinks root filesystem and partition if needed (avoids disk expansion)
+8. **Boot Backup**: Copies all files from boot partition (FAT32)
+9. **Partition Moving**: Relocates root partition data using rsync (overlap-safe via temporary storage)
+10. **Partition Resize**: Adjusts boot partition boundaries using `sfdisk` scripts
 10. **Filesystem Creation**: Creates new FAT32 filesystem with `mkfs.vfat`
 11. **File Restoration**: Restores backed-up boot files
 12. **Root Auto-Adjust** (when `--image-size` used): expands or shrinks root to fit the new image size
@@ -662,9 +661,10 @@ The Docker image will be automatically rebuilt on the next resize operation.
 - Boot partition must be FAT32 (vfat)
 - Root partition must be ext4 for automatic shrinking and move operations
 - Shrinking validates last partition end + 10MB safety margin; aborts if unsafe
-- Partition moving operations are time-consuming for large filesystems:
-  - 10GB partition: minutes to tens of minutes depending on I/O
-  - Uses overlap-safe `dd` backward copy when ranges overlap
+- Partition moving operations use rsync for reliable data transfer:
+  - Handles overlapping partitions safely via temporary storage
+  - Performance depends on partition size and I/O speed
+  - 10GB partition: typically several minutes
 
 ## Advanced Usage
 
