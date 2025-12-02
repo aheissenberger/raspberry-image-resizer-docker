@@ -216,13 +216,20 @@ async function run(exe: Executor) {
     INFO("Step 5b: Root partition does not need to be moved");
   }
 
-  // Step 6: Resize boot partition (write table if not already)
+  // Step 6: Resize boot partition (write table with new boot size)
   INFO("Step 6: Resizing boot partition...");
   if (!DRY) {
     const bootSize = bootNewEnd - layout.boot.start + 1;
     if (!needsRootMove) {
+      // Root didn't move, use original root location
       const rootSize = layout.root.end - layout.root.start + 1;
       const sfd = sfdiskTable(loop, layout.boot.start, bootSize, layout.root.start, rootSize);
+      await exe.run(["sfdisk", "--force", "--no-reread", loop], { stdin: sfd });
+      await rereadMappings(exe, loop);
+    } else {
+      // Root moved, rewrite table with new boot size and moved root location
+      const rootSize = rootNewEnd - rootNewStart + 1;
+      const sfd = sfdiskTable(loop, layout.boot.start, bootSize, rootNewStart, rootSize);
       await exe.run(["sfdisk", "--force", "--no-reread", loop], { stdin: sfd });
       await rereadMappings(exe, loop);
     }
@@ -251,48 +258,51 @@ async function run(exe: Executor) {
     await exe.run(["umount", "/mnt/boot"], { allowNonZeroExit: true });
   }
 
-  // Step 9: Auto-adjust root after image resize
-  if (!DRY && (imageExpanded || imageShrunk)) {
-    INFO("Step 9: Adjusting root partition to use available space...");
+  // Step 9: Auto-adjust root to fill available space (always evaluate when not DRY)
+  if (!DRY) {
+    INFO("Step 9: Evaluating root partition size for auto-adjust...");
     const diskSectors = Number((await exe.run(["blockdev", "--getsz", loop])).stdout.trim());
-
     const dump = (await exe.run(["sfdisk", "-d", loop])).stdout;
     const parsed = parseSfdiskDump(dump, loop);
     const currentRootStart = parsed.root.start;
-
+    const currRootEnd = parsed.root.end;
+    const currRootSize = currRootEnd - currentRootStart + 1;
+    // Leave 2048 sector (1MB) buffer at end for safety/alignment similar to earlier logic
     const maxRootSizeSectors = diskSectors - currentRootStart - 2048;
-    const currRootSize = parsed.root.end - parsed.root.start + 1;
 
-    if (imageExpanded && maxRootSizeSectors > currRootSize) {
-      const sfd = sfdiskTable(loop, parsed.boot.start, parsed.boot.end - parsed.boot.start + 1, currentRootStart, maxRootSizeSectors);
-      await exe.run(["sfdisk", "--force", "--no-reread", loop], { stdin: sfd });
+    // Determine actions:
+    const canGrow = maxRootSizeSectors > currRootSize;
+    const mustShrink = imageShrunk && maxRootSizeSectors < currRootSize; // shrinking due to image file shrink
+
+    if (mustShrink) {
+      INFO("Step 9: Shrinking root filesystem to fit reduced image size...");
+      const targetMB = Math.floor(maxRootSizeSectors * 512 / 1024 / 1024);
+      const e2fsckResult = await exe.run(["e2fsck", "-f", "-y", rootPart], { allowNonZeroExit: true });
+      if (e2fsckResult.code > 2) throw new Error(`e2fsck failed with code ${e2fsckResult.code}`);
+      await exe.run(["resize2fs", rootPart, `${targetMB}M`]);
+      const sfdShrink = sfdiskTable(loop, parsed.boot.start, parsed.boot.end - parsed.boot.start + 1, currentRootStart, maxRootSizeSectors);
+      await exe.run(["sfdisk", "--force", "--no-reread", loop], { stdin: sfdShrink });
       await rereadMappings(exe, loop);
+    } else if (canGrow) {
+      // Grow root if image expanded OR freed space appeared due to boot move
+      INFO("Step 9: Growing root filesystem to occupy remaining free space...");
+      const sfdGrow = sfdiskTable(loop, parsed.boot.start, parsed.boot.end - parsed.boot.start + 1, currentRootStart, maxRootSizeSectors);
+      await exe.run(["sfdisk", "--force", "--no-reread", loop], { stdin: sfdGrow });
+      await rereadMappings(exe, loop);
+      // Refresh rootPart mapping after potential table rewrite
       const base = loop.split("/").pop()!;
       const mapperRoot = `/dev/mapper/${base}p2`;
       rootPart = existsSync(mapperRoot) ? mapperRoot : `${loop}p2`;
-      const e2fsckResult3 = await exe.run(["e2fsck", "-f", "-y", rootPart], { allowNonZeroExit: true });
-      if (e2fsckResult3.code > 2) throw new Error(`e2fsck failed with code ${e2fsckResult3.code}`);
+      const e2fsckResultGrow = await exe.run(["e2fsck", "-f", "-y", rootPart], { allowNonZeroExit: true });
+      if (e2fsckResultGrow.code > 2) throw new Error(`e2fsck failed with code ${e2fsckResultGrow.code}`);
       await exe.run(["resize2fs", rootPart]);
-    } else if (imageShrunk && maxRootSizeSectors < currRootSize) {
-      const maxMB = Math.floor(maxRootSizeSectors * 512 / 1024 / 1024);
-      const e2fsckResult4 = await exe.run(["e2fsck", "-f", "-y", rootPart], { allowNonZeroExit: true });
-      if (e2fsckResult4.code > 2) throw new Error(`e2fsck failed with code ${e2fsckResult4.code}`);
-      await exe.run(["resize2fs", rootPart, `${maxMB}M`]);
-      const sfd = sfdiskTable(loop, parsed.boot.start, parsed.boot.end - parsed.boot.start + 1, currentRootStart, maxRootSizeSectors);
-      await exe.run(["sfdisk", "--force", "--no-reread", loop], { stdin: sfd });
-      await rereadMappings(exe, loop);
     } else if (UNSAFE && !needsRootMove) {
-      WARN("Unsafe resize2fs requested");
-      const e2fsckResult5 = await exe.run(["e2fsck", "-f", "-y", rootPart], { allowNonZeroExit: true });
-      if (e2fsckResult5.code > 2) throw new Error(`e2fsck failed with code ${e2fsckResult5.code}`);
+      WARN("Step 9: Unsafe resize requested (no size change detected)");
+      const e2fsckResultUnsafe = await exe.run(["e2fsck", "-f", "-y", rootPart], { allowNonZeroExit: true });
+      if (e2fsckResultUnsafe.code > 2) throw new Error(`e2fsck failed with code ${e2fsckResultUnsafe.code}`);
       await exe.run(["resize2fs", rootPart]);
-    }
-  } else if (UNSAFE && !needsRootMove) {
-    WARN("UNSAFE ext4 resize mode active");
-    if (!DRY) {
-      const e2fsckResult6 = await exe.run(["e2fsck", "-f", "-y", rootPart], { allowNonZeroExit: true });
-      if (e2fsckResult6.code > 2) throw new Error(`e2fsck failed with code ${e2fsckResult6.code}`);
-      await exe.run(["resize2fs", rootPart]);
+    } else {
+      INFO("Step 9: No root size adjustment needed.");
     }
   }
 

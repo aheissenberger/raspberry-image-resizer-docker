@@ -11,9 +11,9 @@ A **cross-platform, safe, reproducible** solution for resizing and modifying Ras
 - ✅ **Cross-platform**: Works on macOS (Intel & Apple Silicon) using Docker
 - ✅ **Reproducible**: Uses pinned Docker images for consistent results
 - ✅ **Boot partition resizing**: Adjust FAT32 boot partition size
-- ✅ **Automatic optimization**: Intelligently shrinks root partition when needed to avoid disk expansion
-- ✅ **Overall image resizing**: `--image-size` grows or shrinks the entire image file (MB/GB/TB)
-- ✅ **Partition moving**: Automatically moves partitions to make room for boot expansion
+- ✅ **Automatic optimization**: Shrinks root when necessary and auto-grows root to occupy newly freed space
+- ✅ **Overall image resizing**: `--image-size` grows or shrinks the image; root auto-expands/shrinks accordingly
+- ✅ **Partition moving**: Rsync-based root relocation (overlap-safe) to make room for boot expansion
 - ✅ **File preservation**: Backs up and restores all boot files
  - ✅ **Boot label preservation**: Retains existing FAT volume label when recreating boot filesystem (if present)
 - ✅ **Optional ext4 resize**: Opt-in support for manual root partition resizing
@@ -342,15 +342,15 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 2. **Docker Launch**: Starts privileged Linux container with image mounted
 3. **Loop Device**: Attaches image as `/dev/loop0` inside container
 4. **Partition Analysis**: Examines partition table and filesystems
-6. **Usage Detection**: Checks actual filesystem usage to determine if shrinking is beneficial
-7. **Automatic Shrinking**: Shrinks root filesystem and partition if needed (avoids disk expansion)
+6. **Usage Detection**: Checks filesystem usage to determine if shrinking is beneficial before moves
+7. **Automatic Shrinking**: Shrinks root if required to fit layout without forced image growth
 8. **Boot Backup**: Copies all files from boot partition (FAT32)
-9. **Partition Moving**: Relocates root partition data using rsync (overlap-safe via temporary storage)
+9. **Partition Moving**: Relocates root via rsync staging (overlap-safe, filesystem recreated then data restored)
 10. **Partition Resize**: Adjusts boot partition boundaries using `sfdisk` scripts
-10. **Filesystem Creation**: Creates new FAT32 filesystem with `mkfs.vfat`
-11. **File Restoration**: Restores backed-up boot files
-12. **Root Auto-Adjust** (when `--image-size` used): expands or shrinks root to fit the new image size
-13. **Cleanup**: Unmounts filesystems and detaches loop devices
+11. **Filesystem Creation**: Creates new FAT32 filesystem with `mkfs.vfat`
+12. **File Restoration**: Restores backed-up boot files
+13. **Root Auto-Adjust**: Evaluates tail space after any layout/image change and grows/shrinks root to consume safe free space
+14. **Cleanup**: Unmounts filesystems and detaches loop devices
 
 > Boot volume label: If the original boot filesystem has a label (e.g. `BOOT`), it is detected before formatting and reapplied during FAT32 recreation. If no label exists, none is set (behavior unchanged).
 

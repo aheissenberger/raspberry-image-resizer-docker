@@ -648,7 +648,7 @@ Tool must:
   - Moving partitions requires sufficient free space on the disk image.
   - **Automatic optimization**: The tool detects when shrinking root before moving eliminates the need for image expansion.
   - Uses deterministic `sfdisk` table scripts to rewrite partition entries.
-  - Uses overlap‑safe `dd` backward copy to relocate data when ranges overlap; forward `dd` copy otherwise.
+  - Uses rsync with temporary staging for any needed root relocation (dd strategy deprecated).
   - Moving ext4 partitions is safe but time‑consuming for large filesystems (can take 10+ minutes for 10GB+).
   - Most boot expansion operations complete without requiring manual disk image expansion.
 - **Filesystem resizing constraints**:
@@ -679,9 +679,9 @@ Tool must:
 ✔ Shrinking validation prevents truncating active partition data  
 ✔ Clear error messages when shrinking below minimum required size  
 ✔ Expanded images provide sufficient space for subsequent partition operations  
-✔ Root partition automatically expands to fill space when image is grown with `--image-size`  
+✔ Root partition automatically expands to fill space when image grows or when free tail space appears after boot/root moves  
 ✔ Root partition automatically shrinks safely when image is reduced with `--image-size`  
-✔ Root filesystem expansion/shrinking occurs after boot partition resize completes
+✔ Root filesystem expansion/shrinking occurs after boot partition resize or other layout changes
 
 ### TypeScript Implementation
 ✔ All bash commands eliminated from codebase (worker, test-helper, CLI)  

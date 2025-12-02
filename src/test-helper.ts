@@ -298,14 +298,26 @@ ${loopDevice}p2 : start=${rootStart}, size=${rootSizeSectors}, type=83
       );
     }
 
-    const workerResult = await run([
+    // Spawn worker with explicit env to ensure IMAGE_SIZE is propagated
+    const workerProc = Bun.spawn([
       "bun",
       "/usr/local/bin/resize-worker.js",
-    ]);
+    ], {
+      env: { ...process.env },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const workerStdout = await new Response(workerProc.stdout).text();
+    const workerStderr = await new Response(workerProc.stderr).text();
+    const workerExit = await workerProc.exited;
+    const workerResult = { success: workerExit === 0, output: workerStdout + (workerStderr ? "\n" + workerStderr : "") };
     if (!workerResult.success) {
       log("Resize script failed");
       console.error(workerResult.output);
       process.exit(1);
+    }
+    if (config.verbose) {
+      log("Worker output (verbose):\n" + workerResult.output);
     }
 
     log("Re-attaching image for post-resize snapshot...");

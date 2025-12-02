@@ -13,7 +13,6 @@ export interface TestImageConfig {
   freeTailMB?: number;
   verbose?: boolean;
   snapshot?: boolean;
-  fastMove?: boolean; // when set, controls FAST_MOVE env (true => 1, false => 0)
 }
 
 export interface SnapshotFiles {
@@ -78,10 +77,7 @@ export async function runDockerTest(
     env.FREE_TAIL_MB = config.freeTailMB.toString();
   }
 
-  // Explicitly control FAST_MOVE when provided
-  if (config.fastMove !== undefined) {
-    env.FAST_MOVE = config.fastMove ? "1" : "0";
-  }
+  // FAST_MOVE deprecated: rsync-only strategy; no env needed
 
   const envArgs = Object.entries(env).flatMap(([key, value]) => [
     "-e",
