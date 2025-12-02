@@ -16,7 +16,7 @@ import {
   type SnapshotFiles,
 } from "./helpers";
 
-const IMAGE_TAG = "rpi-resizer-slim";
+const IMAGE_TAG = "rpi-image-resizer-test";
 const TEST_TIMEOUT = 300000; // 5 minutes per test
 
 describe("Image Resize E2E Tests", () => {
