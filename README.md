@@ -276,7 +276,8 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 | `--image-size <size>` | Resize whole image (supports `MB`, `GB`, `TB`) | - |
 | `--unsafe-resize-ext4` | Enable ext4 root partition resizing | Disabled |
 | `--dry-run` | Preview changes without modifying | Disabled |
-| `--verbose` | Show detailed output from Docker | Disabled |
+| `--verbose` | Show detailed output from Docker and run a final read-only filesystem check (e2fsck -n) | Disabled |
+| `--verify-fs` | Run a final read-only filesystem check (e2fsck -n) regardless of verbosity | Disabled |
 | `--work-dir <path>` | Working directory for temp files and working image | For compressed inputs: `$TMPDIR` or `/tmp`; otherwise source dir |
 | `-h`, `--help` | Show help message | - |
 

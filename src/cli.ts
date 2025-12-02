@@ -19,7 +19,7 @@ function usage() {
 `Global Options:\n  -h, --help                 Show help\n  -v, --version              Show version\n\n` +
   `Clone/Write/Size Options:\n  --compress <zstd|xz|gzip>  Compress output during clone\n  --level <n>                Compression level\n  --block-size <SIZE>        dd block size (default 4m)\n  --device </dev/diskN>      Override auto-detect; use specific disk (advanced)\n  --yes                      Skip confirmations (write only; dangerous)\n  --preview                  Print the dd command and exit (no changes)\n\n` +
     `  --verbose                  Print duration summary after completion\n\n` +
-`Resize Options:\n  --boot-size <MB>           Target boot partition size (default 256)\n  --image-size <SIZE>        Change overall image size (e.g. 32GB, 8192MB)\n  --unsafe-resize-ext4       Run resize2fs on root when not moving (unsafe)\n  --dry-run                  Plan only, do not modify\n  --verbose                  Verbose logs\n  --docker-image <name>      Docker image name (default rpi-image-resizer:latest)\n  --work-dir <path>          Working directory for temp files (default: TMPDIR or /tmp for compressed)\n`);
+`Resize Options:\n  --boot-size <MB>           Target boot partition size (default 256)\n  --image-size <SIZE>        Change overall image size (e.g. 32GB, 8192MB)\n  --unsafe-resize-ext4       Run resize2fs on root when not moving (unsafe)\n  --dry-run                  Plan only, do not modify\n  --verbose                  Verbose logs (also runs final read-only fsck)\n  --verify-fs                Run final read-only e2fsck verification\n  --docker-image <name>      Docker image name (default rpi-image-resizer:latest)\n  --work-dir <path>          Working directory for temp files (default: TMPDIR or /tmp for compressed)\n`);
 }
 
 function escapePath(p: string) {
@@ -260,6 +260,7 @@ async function main() {
       { name: "unsafe-resize-ext4", type: "boolean" },
       { name: "dry-run", type: "boolean" },
       { name: "verbose", type: "boolean" },
+      { name: "verify-fs", type: "boolean" },
       { name: "docker-image", type: "string" },
       { name: "work-dir", type: "string" }
     ]);
@@ -338,6 +339,7 @@ async function main() {
         UNSAFE_RESIZE_EXT4: args["unsafe-resize-ext4"] ? "1" : "0",
         DRY_RUN: args["dry-run"] ? "1" : "0",
         VERBOSE: args["verbose"] ? "1" : "0",
+        VERIFY_FS: (args["verify-fs"] || args["verbose"]) ? "1" : "0",
       } as Record<string, string>;
 
       // Ensure Docker image exists (will auto-build from embedded resources if needed)

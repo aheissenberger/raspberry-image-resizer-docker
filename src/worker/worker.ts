@@ -18,6 +18,7 @@ async function run(exe: Executor) {
   const IMAGE_SIZE = env("IMAGE_SIZE");
   const UNSAFE = env("UNSAFE_RESIZE_EXT4") === "1";
   const VERBOSE_ENV = env("VERBOSE");
+  const VERIFY_FS = env("VERIFY_FS") === "1";
 
   const imagePath = `/work/${IMAGE_FILE}`;
 
@@ -310,6 +311,25 @@ async function run(exe: Executor) {
   INFO("Step 10: Final verification...");
   if (!DRY) {
     await exe.run(["blkid", bootPart, rootPart], { allowNonZeroExit: true });
+
+    // Optional final filesystem verification (read-only)
+    if (VERIFY_FS || VERBOSE_ENV === "1") {
+      INFO("Step 10b: Running final ext4 filesystem check (read-only)...");
+      const fsckFinal = await exe.run(["e2fsck", "-f", "-n", rootPart], { allowNonZeroExit: true });
+      // e2fsck exit codes: 0 clean, 1 corrected (not with -n), 2 reboot needed, 4 uncorrected errors, >=8 operational/usage errors
+      if (fsckFinal.code >= 8) {
+        ERROR(`Final e2fsck failed (code ${fsckFinal.code})`);
+        ERROR(fsckFinal.stderr);
+        throw new Error(`Final filesystem verification failed with code ${fsckFinal.code}`);
+      }
+      if (fsckFinal.code === 4) {
+        WARN("Final e2fsck reported uncorrected issues (read-only mode). Review output above.");
+      } else if (fsckFinal.code === 2) {
+        WARN("Final e2fsck requests reboot (informational inside container).");
+      } else {
+        INFO("Final e2fsck completed without fatal issues.");
+      }
+    }
 
     // Verbose summary (human readable partition and image sizes) BEFORE detaching loop
     if (VERBOSE_ENV === "1") {
