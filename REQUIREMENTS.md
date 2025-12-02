@@ -1,7 +1,7 @@
 # Raspberry Pi Image Resizer (Docker-Based) — Requirements Document
 
-**Version:** 1.2  
-**Date:** 2025-12-01  
+**Version:** 1.3  
+**Date:** 2025-12-02  
 **Author:** ChatGPT  
 
 This document defines the functional and non-functional requirements for a Docker‑based implementation of a Raspberry Pi disk‑image manipulation and boot‑partition resizing tool.
@@ -67,7 +67,12 @@ The Docker‑based solution shall:
 The system must accept:
 
 ```bash
-bun run src/cli.ts resize <path-to-image> [--boot-size <MB>] [--image-size <size>] [--unsafe-resize-ext4] [--dry-run] [--verbose]
+bun run src/cli.ts resize <path-to-image> [--boot-size <MB>] [--image-size <size>] [--unsafe-resize-ext4] [--dry-run] [--verbose] [--verify-fs]
+bun run src/cli.ts deploy <path-to-image> [options]  # Resize + write in one step
+bun run src/cli.ts clone <output-image-path> [--compress <algorithm>] [--level <1-9|1-19>]
+bun run src/cli.ts write <image-path> [--device <device>] [--block-size <size>]
+bun run src/cli.ts size [--device <device>]
+bun run src/cli.ts clean
 ```
 
 - `<path-to-image>` — required; must be a `.img` or raw image.
@@ -82,6 +87,8 @@ bun run src/cli.ts resize <path-to-image> [--boot-size <MB>] [--image-size <size
     - Resize a 32GB SD card image to 64GB, then expand root to fill the extra space
     - Shrink a 64GB image to 32GB, automatically shrinking root partition to fit
 - `--unsafe-resize-ext4` — optional; allows modifying ext4 root partition (disabled by default).
+- `--verify-fs` — optional; run final read-only filesystem check (e2fsck -n) regardless of verbosity.
+- `--verbose` — optional; show detailed output from Docker and run final read-only filesystem check.
 
 ---
 
@@ -175,6 +182,10 @@ The tool must:
 ```
 docker run --rm -it --privileged -v "$PWD":/work <image>
 ```
+
+- Pass environment variables for verification control:
+  - `VERBOSE=1`: Enable detailed logging and final filesystem verification
+  - `VERIFY_FS=1`: Enable final read-only filesystem check (e2fsck -f -n)
 
 - Use a Docker image that includes:
   - `sfdisk` (partition table dump/apply)
@@ -339,7 +350,23 @@ The Linux container provides full capabilities for:
 
 ---
 
-### **FR-9: Cleanup and Detach**
+### **FR-9: Final Verification (Optional)**
+Before cleanup, the system may optionally verify the filesystem:
+
+**Step 10b: Final Read-Only Filesystem Check**
+- Triggered when `--verify-fs` flag set OR `--verbose` enabled
+- Run `e2fsck -f -n` (force check, read-only mode) on root partition
+- Interpret exit codes:
+  - `0`: Filesystem clean (success)
+  - `1`: Filesystem corrected (not applicable with -n flag)
+  - `2`: System should be rebooted (informational in container)
+  - `4`: Filesystem has uncorrected errors (warning, continue)
+  - `≥8`: Operational or usage error (fatal, abort)
+- Log appropriate INFO/WARN/ERROR messages based on exit code
+- Only fail operation on exit codes ≥8 (operational errors)
+- Provide confidence that filesystem is healthy after all resize operations
+
+### **FR-10: Cleanup and Detach**
 The system must:
 
 - Unmount all mounts
@@ -351,7 +378,7 @@ The system must:
 
 ---
 
-### **FR-10: SD Card Clone and Write**
+### **FR-12: SD Card Clone and Write**
 The system must provide commands to clone a Raspberry Pi SD card to an image file, and write an image file back to an SD card:
 
 ```bash
@@ -441,6 +468,48 @@ The write command must:
 3. Display a numbered list of all compatible devices (no Pi-specific filtering)
 4. Allow interactive selection of the target device
 5. Require double confirmation before writing ("yes" and final "WRITE")
+
+**FR-11: Deploy Command (Resize + Write)**
+The system must provide a unified command that combines resize and write operations:
+
+```bash
+bun run src/cli.ts deploy <path-to-image> [options]
+```
+
+The deploy command must:
+
+1. **Accept resize options**: `--boot-size`, `--image-size`, `--unsafe-resize-ext4`, `--docker-image`, `--work-dir`, `--dry-run`, `--verbose`, `--verify-fs`
+2. **Accept write options**: `--device`, `--block-size`, `--preview`
+3. **Deploy-specific options**:
+   - `--keep-working`: Preserve working image after successful deploy (default: delete)
+4. **Intelligent auto-sizing**:
+   - If `--image-size` not provided, automatically calculate safe size:
+     - Detect target device capacity using `diskutil info`
+     - Default to 98% of device capacity (2% safety margin)
+     - Convert to MB units (e.g., 32GB device → `31352MB`)
+     - Prevents short writes on devices with slightly smaller actual capacity
+5. **Workflow**:
+   - Auto-detect removable device (or use `--device`)
+   - Decompress compressed images to working directory (`.zst`, `.xz`, `.gz`)
+   - Copy uncompressed images to working directory (preserve original)
+   - Execute resize operation on working image (same Docker workflow as resize command)
+   - Preflight: Verify final image size fits on target device
+   - Write resized image to SD card (same as write command)
+   - Cleanup: Delete working image unless `--keep-working` specified
+   - Remount device volumes after write completes
+6. **Progress and timing**:
+   - With `--verbose`: Log duration for resize phase, write phase, and total operation
+   - Format durations in human-readable format (e.g., "1m 23s", "3.5s")
+   - Stream `dd` progress output in real-time during write phase
+7. **Safety**:
+   - Preserve original image (all work on copy in work-dir)
+   - Abort if image doesn't fit on device after resize
+   - Retain double confirmation from write command
+   - Clean up working images to prevent disk space leaks (unless `--keep-working`)
+8. **Error handling**:
+   - Abort on resize failure (don't proceed to write)
+   - Clean up working image on failure
+   - Preserve working image on write failure for debugging (ignore `--keep-working`)
 
 **Write streaming and progress (implementation requirements):**
 
@@ -584,6 +653,17 @@ The write command must:
   - Handles overlapping partitions safely via temporary storage
   - Typical performance: ~8 seconds per test for 700MB images
   - Replaces complex dd-based backward copy logic
+- ✅ **Deploy Command**: One-step resize and write workflow
+  - Intelligent auto-sizing to 98% of device capacity
+  - Automatic cleanup of working images (--keep-working opt-out)
+  - Combines resize and write operations seamlessly
+  - Preserves original image (works on copy)
+  - Duration logging for resize, write, and total time with --verbose
+- ✅ **Filesystem Verification**: Optional final read-only e2fsck check
+  - --verify-fs flag for explicit verification
+  - --verbose automatically enables verification
+  - Step 10b: e2fsck -f -n with exit code interpretation
+  - Provides confidence in filesystem integrity after operations
 - ✅ **Embedded Docker Image**: Self-contained binary with auto-build capability
   - Dockerfile and worker.js embedded at compile time using Bun import assertions
   - Automatic Docker image build on first run (no manual docker build needed)
@@ -672,6 +752,21 @@ Tool must:
 ✔ SD card detection correctly identifies devices with `cmdline.txt`  
 ✔ User can select device by index number  
 ✔ Cloned image is bootable and identical to source SD card
+
+### Deploy Command
+✔ `bun run src/cli.ts deploy` auto-sizes image to 98% of device capacity when --image-size omitted  
+✔ Deploy command resizes image and writes to SD card in one operation  
+✔ Deploy preserves original image (works on copy in work-dir)  
+✔ Deploy deletes working image after successful write by default  
+✔ --keep-working flag preserves working image after deploy  
+✔ --verbose logs duration for resize phase, write phase, and total time  
+✔ Deploy aborts if resized image doesn't fit on target device
+
+### Filesystem Verification
+✔ --verify-fs flag runs final read-only e2fsck check regardless of verbosity  
+✔ --verbose automatically enables final filesystem verification  
+✔ Worker Step 10b interprets e2fsck exit codes correctly (0=clean, 4=warn, ≥8=fatal)  
+✔ Verification provides confidence in filesystem integrity after operations
 
 ### Image Size Adjustment
 ✔ `--image-size` parameter correctly expands image files with MB/GB/TB units  

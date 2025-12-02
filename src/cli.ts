@@ -15,6 +15,7 @@ function usage() {
   console.log(`raspberry-image-tool v${VERSION}\n\n` +
 `Usage:\n  rpi-tool <command> [options]\n\n` +
 `Commands:\n  version                    Print version\n  clone <output-image>       Clone SD to image (macOS)\n  write <image>              Write image to SD (macOS)\n  resize <image>             Resize and adjust partitions (Docker)\n  clean                      Remove Docker images\n\n` +
+  `  deploy <image>             Resize image (Docker) then write to SD (macOS)\n` +
   `  size                       Show size of removable device (macOS)\n\n` +
 `Global Options:\n  -h, --help                 Show help\n  -v, --version              Show version\n\n` +
   `Clone/Write/Size Options:\n  --compress <zstd|xz|gzip>  Compress output during clone\n  --level <n>                Compression level\n  --block-size <SIZE>        dd block size (default 4m)\n  --device </dev/diskN>      Override auto-detect; use specific disk (advanced)\n  --yes                      Skip confirmations (write only; dangerous)\n  --preview                  Print the dd command and exit (no changes)\n\n` +
@@ -69,6 +70,114 @@ function formatDuration(ms: number): string {
     return `${minutes}m ${remainingSeconds}s`;
   } else {
     return `${seconds}s`;
+  }
+}
+
+// Shared utility: detect and select removable device for write/deploy operations
+async function detectAndSelectDevice(exec: BunExecutor, explicitDevice?: string): Promise<{ disk: string; rdisk: string }> {
+  let selected: string | undefined = explicitDevice;
+  if (!selected) {
+    const disks = (await exec.run(["bash", "-lc", "diskutil list | grep -E '^/dev/disk[0-9]+' | awk '{print $1}'"]))
+      .stdout.trim().split(/\s+/).filter(Boolean);
+    for (const d of disks) {
+      const info = await exec.run(["bash", "-lc", `diskutil info ${d} | grep 'Removable Media:' | grep -q Removable && echo yes || echo no`]);
+      if (info.stdout.trim() === "yes") { selected = d; break; }
+    }
+  }
+  if (!selected) throw new Error("No removable device detected");
+  const raw = selected.replace("/dev/disk", "/dev/rdisk");
+  return { disk: selected, rdisk: raw };
+}
+
+// Shared utility: preflight check that image fits on device
+async function preflightImageSize(exec: BunExecutor, imagePath: string, device: string, isCompressed: boolean): Promise<void> {
+  if (!isCompressed) {
+    const imgSize = Bun.file(imagePath).size;
+    const devSize = await getDiskSizeBytes(exec, device);
+    if (imgSize > devSize) {
+      throw new Error(
+        `Image (${bytesToGiB(imgSize)}) is larger than device ${device} (${bytesToGiB(devSize)}). ` +
+        `Use 'rpi-tool resize --image-size <smaller size>' to shrink the image or choose a larger device.`
+      );
+    }
+  } else {
+    console.error("Note: writing from compressed stream; exact uncompressed size preflight is not available.");
+  }
+}
+
+// Shared utility: write image to device with optional decompression
+async function writeImageToDevice(
+  exec: BunExecutor,
+  imagePath: string,
+  device: { disk: string; rdisk: string },
+  blockSize: string,
+  decompressor?: string[]
+): Promise<void> {
+  await exec.run(["diskutil", "unmountDisk", device.disk], { allowNonZeroExit: true });
+  
+  console.log(`About to WRITE image to device: ${device.disk} (raw ${device.rdisk})`);
+  
+  if (decompressor) {
+    const cmd = `${decompressor.join(" ")} ${escapePath(imagePath)} | sudo dd of=${device.rdisk} bs=${blockSize} conv=fsync status=progress`;
+    await exec.run(["bash", "-lc", cmd], { onStderrChunk: (s) => process.stderr.write(s) });
+  } else {
+    await exec.run(
+      ["bash", "-lc", `sudo dd if=${escapePath(imagePath)} of=${device.rdisk} bs=${blockSize} conv=fsync status=progress`],
+      { onStderrChunk: (s) => process.stderr.write(s) }
+    );
+  }
+  
+  await exec.run(["sync"], { allowNonZeroExit: true });
+  await exec.run(["diskutil", "mountDisk", device.disk], { allowNonZeroExit: true });
+}
+
+// Shared utility: prepare working image (decompress or copy)
+async function prepareWorkingImage(
+  image: string,
+  workingPath: string,
+  isDryRun: boolean
+): Promise<string> {
+  const algo = detectCompressionByExt(image);
+  
+  if (algo) {
+    console.error(`Detected ${algo} compressed image`);
+    if (isDryRun) {
+      console.error("Dry-run: skipping decompression");
+      return image;
+    } else {
+      const decomp = buildDecompressor(algo);
+      decomp.push(image);
+      const proc = spawn({
+        cmd: decomp,
+        stdout: Bun.file(workingPath),
+        stderr: "pipe",
+      });
+      const exitCode = await proc.exited;
+      const stderr = await new Response(proc.stderr).text();
+      
+      if (exitCode !== 0) {
+        throw new Error(`Decompression failed with code ${exitCode}\n${stderr}`);
+      }
+      console.log(`Working copy created: ${workingPath}`);
+      return workingPath;
+    }
+  }
+  
+  return image;
+}
+
+// Shared utility: create backup of source image
+async function createBackup(
+  exec: BunExecutor,
+  sourcePath: string,
+  targetPath: string,
+  isDryRun: boolean
+): Promise<void> {
+  if (!isDryRun) {
+    await exec.run(["cp", sourcePath, targetPath]);
+    console.log(`Backup created: ${targetPath}`);
+  } else {
+    console.log("Dry-run: not creating backup or working copy, operating read-only");
   }
 }
 
@@ -161,66 +270,142 @@ async function main() {
 
   if (command === "write") {
     const { args, positional } = parseArgs(rest, [
-      { name: "device", type: "string" }, // optional explicit device: /dev/diskN
+      { name: "device", type: "string" },
       { name: "block-size", type: "string" }
     ]);
     const image = positional[0];
     if (!image) throw new Error("Missing <image>");
 
-    // choose target device
-    let selected: string | undefined = (args.device as string | undefined);
-    if (!selected) {
-      const disks = (await exec.run(["bash", "-lc", "diskutil list | grep -E '^/dev/disk[0-9]+' | awk '{print $1}'"]))
-        .stdout.trim().split(/\s+/).filter(Boolean);
-      for (const d of disks) {
-        const info = await exec.run(["bash", "-lc", `diskutil info ${d} | grep 'Removable Media:' | grep -q Removable && echo yes || echo no`]);
-        if (info.stdout.trim() === "yes") { selected = d; break; }
-      }
-    }
-    if (!selected) throw new Error("No removable device detected for write");
-    const raw = selected.replace("/dev/disk", "/dev/rdisk");
-
-    // detect decompressor
+    const device = await detectAndSelectDevice(exec, args.device as string | undefined);
+    const bs = resolveBlockSize(args["block-size"] as string | undefined);
     const algo = detectCompressionByExt(image);
     const decomp = algo ? buildDecompressor(algo) : undefined;
 
-    // Resolve block size (default 4m)
-    const bs = resolveBlockSize(args["block-size"] as string | undefined);
-
-    // Preflight: if image is uncompressed, ensure device capacity >= image size
-    if (!decomp) {
-      const imgSize = Bun.file(image).size;
-      const devSize = await getDiskSizeBytes(exec, selected);
-      if (imgSize > devSize) {
-        throw new Error(
-          `Image (${bytesToGiB(imgSize)}) is larger than device ${selected} (${bytesToGiB(devSize)}). ` +
-          `Use 'rpi-tool resize --image-size <smaller size>' to shrink the image or choose a larger device.`
-        );
-      }
-    } else {
-      // Optional: warn we cannot preflight exact size for compressed streams
-      console.error("Note: writing from compressed stream; exact uncompressed size preflight is not available.");
-    }
-
-    // Unmount volumes (best-effort)
-    await exec.run(["diskutil", "unmountDisk", selected], { allowNonZeroExit: true });
-
-    // dd command with conv=fsync to flush writes
-    if (decomp) {
-      const cmd = `${decomp.join(" ")} ${escapePath(image)} | sudo dd of=${raw} bs=${bs} conv=fsync status=progress`;
-      console.log(`About to WRITE image to device: ${selected} (raw ${raw})`);
-      await exec.run(["bash", "-lc", cmd], { onStderrChunk: (s) => process.stderr.write(s) });
-    } else {
-      console.log(`About to WRITE image to device: ${selected} (raw ${raw})`);
-      await exec.run(["bash", "-lc", `sudo dd if=${escapePath(image)} of=${raw} bs=${bs} conv=fsync status=progress`], { onStderrChunk: (s) => process.stderr.write(s) });
-    }
-
-    await exec.run(["sync"], { allowNonZeroExit: true });
-    await exec.run(["diskutil", "mountDisk", selected], { allowNonZeroExit: true });
+    await preflightImageSize(exec, image, device.disk, !!algo);
+    await writeImageToDevice(exec, image, device, bs, decomp);
+    
     console.log("✓ Write completed");
     if (argv.includes("--verbose")) {
       const duration = Date.now() - startTime;
       console.log(`[DURATION] ${formatDuration(duration)}`);
+    }
+    return;
+  }
+
+  if (command === "deploy") {
+    const { args, positional } = parseArgs(rest, [
+      // Resize-related
+      { name: "boot-size", type: "number", default: 256 },
+      { name: "image-size", type: "string" },
+      { name: "unsafe-resize-ext4", type: "boolean" },
+      { name: "verify-fs", type: "boolean" },
+      { name: "docker-image", type: "string" },
+      { name: "work-dir", type: "string" },
+      { name: "dry-run", type: "boolean" },
+      { name: "verbose", type: "boolean" },
+      // Write-related
+      { name: "device", type: "string" },
+      { name: "block-size", type: "string" },
+      { name: "preview", type: "boolean" },
+      // Deploy-specific
+      { name: "keep-working", type: "boolean" }
+    ]);
+    const image = positional[0];
+    if (!image) throw new Error("Missing <image>");
+
+    const device = await detectAndSelectDevice(exec, args.device as string | undefined);
+    const bs = resolveBlockSize(args["block-size"] as string | undefined);
+
+    // Prepare paths and directories
+    const algo = detectCompressionByExt(image);
+    const defaultTmp = process.env.TMPDIR || "/tmp";
+    const srcDir = dirname(image);
+    const imageBase = basename(image);
+    const lastDot = imageBase.lastIndexOf(".");
+    const bareOriginal = lastDot > 0 ? imageBase.slice(0, lastDot) : imageBase;
+    const extOriginal = lastDot > 0 ? imageBase.slice(lastDot) : "";
+    const workDir = String(args["work-dir"] ?? (algo && !args["dry-run"] ? defaultTmp : srcDir));
+    const ts = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0,12);
+    const workingName = `${bareOriginal}_${ts}.img`;
+    const workingPath = `${workDir}/${workingName}`;
+
+    // Phase 1: Prepare working image (decompress/copy) + Resize in Docker
+    const resizeStart = Date.now();
+    const workImage = await prepareWorkingImage(image, workingPath, !!args["dry-run"]);
+
+    // Create backups/working copy unless dry-run
+    let targetImage = workingName;
+    if (!args["dry-run"]) {
+      if (algo) {
+        const compressedBackupName = `${bareOriginal}_${ts}${extOriginal}`;
+        await createBackup(exec, image, `${srcDir}/${compressedBackupName}`, false);
+      } else {
+        await createBackup(exec, image, workingPath, false);
+        console.log(`Working copy created: ${workingPath}`);
+      }
+    } else {
+      console.log("Dry-run: not creating backup or working copy, operating read-only");
+      targetImage = imageBase;
+    }
+
+    // Compute default image size from target device if not provided
+    const devSizeBytes = await getDiskSizeBytes(exec, selected);
+    const safeBytes = Math.floor(devSizeBytes * 0.98); // 2% headroom
+    const safeMB = Math.floor(safeBytes / 1024 / 1024);
+    const chosenImageSize = (args["image-size"] as string | undefined) ?? `${safeMB}MB`;
+
+    const dockerImage = (args["docker-image"] as string) || "rpi-image-resizer:latest";
+    const env = {
+      IMAGE_FILE: targetImage,
+      BOOT_SIZE_MB: String(args["boot-size"] ?? 256),
+      IMAGE_SIZE: String(chosenImageSize),
+      UNSAFE_RESIZE_EXT4: args["unsafe-resize-ext4"] ? "1" : "0",
+      DRY_RUN: args["dry-run"] ? "1" : "0",
+      VERBOSE: args["verbose"] ? "1" : "0",
+      VERIFY_FS: (args["verify-fs"] || args["verbose"]) ? "1" : "0",
+    } as Record<string, string>;
+
+    await ensureImage(exec, dockerImage);
+    const result = await runWorker(exec, { image: dockerImage, workdir: workDir, env, stream: true });
+    process.exitCode = result.code;
+    if (result.code !== 0) throw new Error(`Worker failed: ${result.code}`);
+    if (args["verbose"]) {
+      const d = Date.now() - resizeStart;
+      console.log(`[DURATION][RESIZE] ${formatDuration(d)}`);
+    }
+
+    if (args["dry-run"]) {
+      console.log("✓ Deploy (resize phase) completed - dry run, skipping write");
+      return;
+    }
+
+    // Phase 2: Write working image to device
+    const writeStart = Date.now();
+    const finalPath = `${workDir}/${workingName}`;
+    await preflightImageSize(exec, finalPath, device.disk, false);
+
+    if (args["preview"]) {
+      const previewCmd = `sudo dd if=${escapePath(finalPath)} of=${device.rdisk} bs=${bs} conv=fsync status=progress`;
+      console.log(previewCmd);
+      return;
+    }
+
+    await writeImageToDevice(exec, finalPath, device, bs);
+    console.log("✓ Deploy completed (resize + write)");
+    
+    // Cleanup: delete working image unless --keep-working
+    if (!args["keep-working"]) {
+      console.log(`Deleting working image: ${finalPath}`);
+      await exec.run(["rm", "-f", finalPath], { allowNonZeroExit: true });
+    } else {
+      console.log(`Working image preserved: ${finalPath}`);
+    }
+    
+    if (args["verbose"]) {
+      const d = Date.now() - writeStart;
+      console.log(`[DURATION][WRITE] ${formatDuration(d)}`);
+      const total = Date.now() - startTime;
+      console.log(`[DURATION][TOTAL] ${formatDuration(total)}`);
     }
     return;
   }
@@ -286,30 +471,7 @@ async function main() {
     const workingPath = `${workDir}/${workingName}`;
 
     // Prepare working image: decompress directly to workingPath for compressed inputs
-    let workImage = image;
-    if (algo) {
-      console.error(`Detected ${algo} compressed image`);
-      if (args["dry-run"]) {
-        console.error("Dry-run: skipping decompression");
-        workImage = image; // Use compressed file path for dry-run
-      } else {
-        const decomp = buildDecompressor(algo);
-        decomp.push(image);
-        const proc = spawn({
-          cmd: decomp,
-          stdout: Bun.file(workingPath),
-          stderr: "pipe",
-        });
-        const exitCode = await proc.exited;
-        const stderr = await new Response(proc.stderr).text();
-        
-        if (exitCode !== 0) {
-          throw new Error(`Decompression failed with code ${exitCode}\n${stderr}`);
-        }
-        workImage = workingPath;
-        console.log(`Working copy created: ${workingPath}`);
-      }
-    }
+    const workImage = await prepareWorkingImage(image, workingPath, !!args["dry-run"]);
 
     try {
       // Create backups/working copy unless dry-run
@@ -319,12 +481,11 @@ async function main() {
         if (algo) {
           // Backup the compressed source in its original directory
           const compressedBackupName = `${bareOriginal}_${ts}${extOriginal}`;
-          await exec.run(["cp", image, `${srcDir}/${compressedBackupName}`]);
-          console.log(`Backup created: ${srcDir}/${compressedBackupName}`);
+          await createBackup(exec, image, `${srcDir}/${compressedBackupName}`, false);
           // Working file already created via decompression to workingPath
         } else {
           // Uncompressed: copy source to workDir as working file
-          await exec.run(["cp", image, workingPath]);
+          await createBackup(exec, image, workingPath, false);
           console.log(`Working copy created: ${workingPath}`);
         }
       } else {

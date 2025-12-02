@@ -6,6 +6,7 @@ A **cross-platform, safe, reproducible** solution for resizing and modifying Ras
 
 - ✅ **SD Card Cloning**: Clone Raspberry Pi SD cards directly to image files
 - ✅ **SD Card Writing**: Write an image back to a Raspberry Pi SD card (with double confirmation)
+- ✅ **One-Step Deploy**: Resize image and write to SD card in a single command
 - ✅ **Device size query**: Print removable device capacity with `size` command
 - ✅ **Safe**: Creates timestamped backups before any modification
 - ✅ **Cross-platform**: Works on macOS (Intel & Apple Silicon) using Docker
@@ -98,6 +99,9 @@ bun run build
 # With custom boot size
 ./rpi-tool resize path/to/raspios.img --boot-size 512
 
+# One-step deploy: resize and write to SD card
+./rpi-tool deploy raspios.img --verbose
+
 # Clean up Docker images and build artifacts
 ./rpi-tool clean
 
@@ -120,9 +124,9 @@ This will:
 - Preserve all boot files
 - Leave the root partition intact
 
-### Clone or Write an SD Card (Optional)
+### Clone, Write, or Deploy to SD Card
 
-If you need to create an image from a physical SD card first:
+**Clone from SD card to image:**
 
 ```bash
 ./rpi-tool clone raspios-backup.img
@@ -135,7 +139,7 @@ This will:
 - Clone the entire SD card to an image file using `dd`
 - Remount mountable volumes on the SD card after cloning completes
 
-To write an image back to an SD card:
+**Write image to SD card:**
 
 ```bash
 ./rpi-tool write raspios-backup.img
@@ -146,6 +150,19 @@ This will:
 - Prompt for device selection
 - Ask for double confirmation ("yes" and final "WRITE")
 - Unmount the selected device and write the image using `dd`
+
+**Deploy: Resize and write in one step:**
+
+```bash
+./rpi-tool deploy raspios.img
+```
+
+This will:
+- Auto-detect target SD card device
+- Default image size to 98% of device capacity (safe fit)
+- Resize image in Docker (same as `resize` command)
+- Write resized image directly to SD card
+- Delete working image after successful write (use `--keep-working` to preserve)
 
 ## Usage
 
@@ -260,15 +277,16 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 
 ---
 
-### Resizing Images (Bun CLI)
+### Resizing Images
 
-### Basic Syntax
+#### Basic Syntax
 
 ```bash
 ./rpi-tool resize <path-to-image> [options]
+./rpi-tool deploy <path-to-image> [options]  # Resize + write to SD
 ```
 
-### Options
+#### Resize Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
@@ -280,6 +298,15 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 | `--verify-fs` | Run a final read-only filesystem check (e2fsck -n) regardless of verbosity | Disabled |
 | `--work-dir <path>` | Working directory for temp files and working image | For compressed inputs: `$TMPDIR` or `/tmp`; otherwise source dir |
 | `-h`, `--help` | Show help message | - |
+
+#### Deploy-Specific Options
+
+| Option | Description | Default |
+|--------|-------------|---------||
+| `--device </dev/diskN>` | Override auto-detection and use a specific disk | Auto-detect |
+| `--block-size <SIZE>` | dd block size (default 4m) | 4m |
+| `--keep-working` | Keep working image after successful deploy | Delete after write |
+| `--preview` | Print the dd command and exit (no write) | - |
 
 > Note: Before setting a large `--image-size` (e.g., 64GB), first check your SD card's real capacity and pick a slightly smaller size to avoid short write errors.
 
@@ -331,7 +358,30 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 ./rpi-tool resize raspios.img --boot-size 512 --verbose
 ```
 
+**Deploy examples:**
+```bash
+# Basic deploy (auto-size to device capacity)
+./rpi-tool deploy raspios.img
+
+# Deploy with explicit size and boot partition
+./rpi-tool deploy raspios.img --image-size 32GB --boot-size 512
+
+# Deploy compressed image with verbose output
+./rpi-tool deploy raspios.img.zst --verbose
+
+# Keep working image after deploy
+./rpi-tool deploy raspios.img --keep-working
+
+# Preview the dd command without writing
+./rpi-tool deploy raspios.img --preview
+
+# Deploy with specific device and block size
+./rpi-tool deploy raspios.img --device /dev/disk4 --block-size 8m
+```
+
 ## How It Works
+
+### Resize Command
 
 1. **Backup & Working Copy**:
    - If the input is compressed (`.img.zst/.xz/.gz`):
@@ -354,6 +404,16 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 14. **Cleanup**: Unmounts filesystems and detaches loop devices
 
 > Boot volume label: If the original boot filesystem has a label (e.g. `BOOT`), it is detected before formatting and reapplied during FAT32 recreation. If no label exists, none is set (behavior unchanged).
+
+### Deploy Command
+
+1. **Device Detection**: Auto-detects removable SD card device (or use `--device`)
+2. **Size Calculation**: If `--image-size` not provided, defaults to 98% of device capacity (safe fit)
+3. **Resize Phase**: Executes full resize workflow (same as `resize` command)
+4. **Preflight Check**: Validates final image size fits on target device
+5. **Write Phase**: Unmounts device and writes resized image with `dd`
+6. **Cleanup**: Deletes working image (unless `--keep-working` specified)
+7. **Remount**: Remounts device volumes after write completes
 
 ## Safety Features
 
@@ -726,9 +786,9 @@ If you have a Linux system with all required tools, you can run the TS worker in
 sudo IMAGE_FILE=image.img BOOT_SIZE_MB=256 VERBOSE=1 bun run src/worker/worker.ts
 ```
 
-### Complete Workflow Example
+### Complete Workflow Examples
 
-Clone an SD card and then resize it:
+**Traditional workflow (clone → resize → write):**
 
 ```bash
 # Step 1: Clone your SD card to an image
@@ -738,12 +798,26 @@ Clone an SD card and then resize it:
 # (First run auto-builds Docker image)
 ./rpi-tool resize original-raspios.img --boot-size 512
 
+# Step 3: Write resized image back to SD card
+./rpi-tool write original-raspios_202511261430.img
+
 # Optional: Expand or shrink the overall image and auto-adjust root
 ./rpi-tool resize original-raspios.img --image-size 64GB --boot-size 256
 ./rpi-tool resize original-raspios.img --image-size 600MB --boot-size 64
+```
 
-# The resized image will be saved as original-raspios_202511261430.img
-# Original clone remains unchanged
+**Fast workflow (resize + write in one step):**
+
+```bash
+# One command: resize image and write to SD card
+# Automatically sizes to fit target device
+./rpi-tool deploy raspios.img --boot-size 512 --verbose
+
+# Deploy with explicit size (useful for smaller target cards)
+./rpi-tool deploy raspios.img --image-size 32GB --boot-size 256
+
+# Deploy compressed image directly
+./rpi-tool deploy raspios.img.zst --verbose
 ```
 
 ## Migration from Bash Scripts
