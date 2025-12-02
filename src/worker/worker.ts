@@ -331,6 +331,13 @@ async function run(exe: Executor) {
       }
     }
 
+    // Step 10c: Create /forcefsck to trigger fsck on Raspberry Pi boot
+    INFO("Step 10c: Creating /forcefsck marker for boot-time filesystem check...");
+    mkdirSync("/mnt/root", { recursive: true });
+    await exe.run(["mount", rootPart, "/mnt/root"]);
+    await exe.run(["touch", "/mnt/root/forcefsck"]);
+    await exe.run(["umount", "/mnt/root"], { allowNonZeroExit: true });
+
     // Verbose summary (human readable partition and image sizes) BEFORE detaching loop
     if (VERBOSE_ENV === "1") {
       try {
