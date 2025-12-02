@@ -294,8 +294,8 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 | `--image-size <size>` | Resize whole image (supports `MB`, `GB`, `TB`) | - |
 | `--unsafe-resize-ext4` | Enable ext4 root partition resizing | Disabled |
 | `--dry-run` | Preview changes without modifying | Disabled |
-| `--verbose` | Show detailed output from Docker and run a final read-only filesystem check (e2fsck -n) | Disabled |
-| `--verify-fs` | Run a final read-only filesystem check (e2fsck -n) regardless of verbosity | Disabled |
+| `--verbose` | Show detailed output from Docker and run a final read-only filesystem check (via Docker) | Disabled |
+| `--verify-fs` | Run filesystem verification (fsck.vfat for boot FAT, e2fsck for root ext4) via Docker container after write/deploy | Disabled |
 | `--work-dir <path>` | Working directory for temp files and working image | For compressed inputs: `$TMPDIR` or `/tmp`; otherwise source dir |
 | `-h`, `--help` | Show help message | - |
 
@@ -307,6 +307,7 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 | `--block-size <SIZE>` | dd block size (default 4m) | 4m |
 | `--keep-working` | Keep working image after successful deploy | Delete after write |
 | `--preview` | Print the dd command and exit (no write) | - |
+| `--verify-fs` | Verify boot (FAT) and root (ext4) filesystems after write via Docker container | Disabled (enabled by --verbose) |
 
 > Note: Before setting a large `--image-size` (e.g., 64GB), first check your SD card's real capacity and pick a slightly smaller size to avoid short write errors.
 
@@ -372,6 +373,9 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 # Keep working image after deploy
 ./rpi-tool deploy raspios.img --keep-working
 
+# Verify filesystems after write (boot FAT + root ext4)
+./rpi-tool deploy raspios.img --verify-fs
+
 # Preview the dd command without writing
 ./rpi-tool deploy raspios.img --preview
 
@@ -412,8 +416,9 @@ This loop is read-only and safe: `if=/dev/rdisk2` reads from the card and `of=/d
 3. **Resize Phase**: Executes full resize workflow (same as `resize` command)
 4. **Preflight Check**: Validates final image size fits on target device
 5. **Write Phase**: Unmounts device and writes resized image with `dd`
-6. **Cleanup**: Deletes working image (unless `--keep-working` specified)
-7. **Remount**: Remounts device volumes after write completes
+6. **Filesystem Verification** (optional): Runs `fsck.vfat` (boot) and `e2fsck` (root) checks via Docker container with `--verify-fs` or `--verbose`
+7. **Cleanup**: Deletes working image (unless `--keep-working` specified)
+8. **Remount**: Remounts device volumes after write completes
 
 ## Safety Features
 

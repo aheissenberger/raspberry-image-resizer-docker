@@ -18,7 +18,8 @@ function usage() {
   `  deploy <image>             Resize image (Docker) then write to SD (macOS)\n` +
   `  size                       Show size of removable device (macOS)\n\n` +
 `Global Options:\n  -h, --help                 Show help\n  -v, --version              Show version\n\n` +
-  `Clone/Write/Size Options:\n  --compress <zstd|xz|gzip>  Compress output during clone\n  --level <n>                Compression level\n  --block-size <SIZE>        dd block size (default 4m)\n  --device </dev/diskN>      Override auto-detect; use specific disk (advanced)\n  --yes                      Skip confirmations (write only; dangerous)\n  --preview                  Print the dd command and exit (no changes)\n\n` +
+  `Clone/Write/Size Options:\n  --compress <zstd|xz|gzip>  Compress output during clone\n  --level <n>                Compression level\n  --block-size <SIZE>        dd block size (default 4m)\n  --device </dev/diskN>      Override auto-detect; use specific disk (advanced)\n  --yes                      Skip confirmations (write only; dangerous)\n  --preview                  Print the dd command and exit (no changes)\n` +
+    `  --verify-fs                Basic read verification after write (macOS limitation)\n` +
     `  --verbose                  Print duration summary after completion\n\n` +
 `Resize Options:\n  --boot-size <MB>           Target boot partition size (default 256)\n  --image-size <SIZE>        Change overall image size (e.g. 32GB, 8192MB)\n  --unsafe-resize-ext4       Run resize2fs on root when not moving (unsafe)\n  --dry-run                  Plan only, do not modify\n  --verbose                  Verbose logs (also runs final read-only fsck)\n  --verify-fs                Run final read-only e2fsck verification\n  --docker-image <name>      Docker image name (default rpi-image-resizer:latest)\n  --work-dir <path>          Working directory for temp files (default: TMPDIR or /tmp for compressed)\n`);
 }
@@ -111,7 +112,8 @@ async function writeImageToDevice(
   imagePath: string,
   device: { disk: string; rdisk: string },
   blockSize: string,
-  decompressor?: string[]
+  decompressor?: string[],
+  verifyFs?: boolean
 ): Promise<void> {
   await exec.run(["diskutil", "unmountDisk", device.disk], { allowNonZeroExit: true });
   
@@ -129,7 +131,115 @@ async function writeImageToDevice(
   
   await exec.run(["sync"], { allowNonZeroExit: true });
   await exec.run(["diskutil", "mountDisk", device.disk], { allowNonZeroExit: true });
+  
+  if (verifyFs) {
+      await verifyFilesystemsOnDeviceViaDocker(exec, device);
+  }
 }
+
+  // Shared utility: verify filesystems on device after write (Docker-based)
+  async function verifyFilesystemsOnDeviceViaDocker(
+    exec: BunExecutor,
+    device: { disk: string; rdisk: string }
+  ): Promise<void> {
+    console.log("\n[VERIFY] Running filesystem checks on written device via Docker container...");
+  
+    // Unmount device on macOS before Docker access
+    await exec.run(["diskutil", "unmountDisk", device.disk], { allowNonZeroExit: true });
+  
+    try {
+      // Create verification script that will run inside Docker container
+      const verifyScript = `#!/bin/bash
+  set -e
+  DEVICE="$1"
+
+  echo "[VERIFY] Attaching device in container: \${DEVICE}"
+
+  # Check FAT filesystem on partition 1 (boot)
+  echo "[VERIFY] Checking boot partition (FAT)..."
+  if fsck.vfat -n "\${DEVICE}1" 2>&1; then
+    BOOT_CODE=$?
+    if [ $BOOT_CODE -eq 0 ]; then
+      echo "[VERIFY] ✓ Boot partition (FAT): clean"
+    elif [ $BOOT_CODE -eq 1 ]; then
+      echo "[VERIFY] ✓ Boot partition (FAT): clean (minor issues corrected in check)"
+    else
+      echo "[VERIFY] ✗ Boot partition (FAT): errors detected (code $BOOT_CODE)"
+      exit 1
+    fi
+  else
+    BOOT_CODE=$?
+    echo "[VERIFY] ✗ Boot partition (FAT): check failed with code $BOOT_CODE"
+    exit 1
+  fi
+
+  # Check ext4 filesystem on partition 2 (root)
+  echo "[VERIFY] Checking root partition (ext4)..."
+  if e2fsck -n -f "\${DEVICE}2" 2>&1; then
+    EXT4_CODE=$?
+    if [ $EXT4_CODE -eq 0 ]; then
+      echo "[VERIFY] ✓ Root partition (ext4): clean"
+    elif [ $EXT4_CODE -eq 1 ]; then
+      echo "[VERIFY] ✓ Root partition (ext4): clean (issues corrected in check)"
+    elif [ $EXT4_CODE -eq 4 ]; then
+      echo "[VERIFY] ⚠ Root partition (ext4): uncorrected errors (read-only check)"
+    elif [ $EXT4_CODE -ge 8 ]; then
+      echo "[VERIFY] ✗ Root partition (ext4): fatal errors (code $EXT4_CODE)"
+      exit 1
+    else
+      echo "[VERIFY] ⚠ Root partition (ext4): check returned code $EXT4_CODE"
+    fi
+  else
+    EXT4_CODE=$?
+    if [ $EXT4_CODE -ge 8 ]; then
+      echo "[VERIFY] ✗ Root partition (ext4): check failed with code $EXT4_CODE"
+      exit 1
+    elif [ $EXT4_CODE -eq 4 ]; then
+      echo "[VERIFY] ⚠ Root partition (ext4): uncorrected errors (read-only check)"
+    else
+      echo "[VERIFY] ⚠ Root partition (ext4): check returned code $EXT4_CODE"
+    fi
+  fi
+
+  echo "[VERIFY] Filesystem verification completed"
+  `;
+
+      // Write script to temp file
+      const scriptPath = `/tmp/verify-fs-${Date.now()}.sh`;
+      await Bun.write(scriptPath, verifyScript);
+      await exec.run(["chmod", "+x", scriptPath]);
+
+      // Run Docker container with privileged mode to access device
+      const dockerImage = "ghcr.io/andihofmeister/raspberry-pi-image-resizer:latest";
+      const dockerArgs = [
+        "run",
+        "--rm",
+        "--privileged",
+        "-v", `${scriptPath}:/verify.sh`,
+        dockerImage,
+        "/verify.sh",
+        device.disk
+      ];
+
+      console.log(`[VERIFY] Running Docker verification with device ${device.disk}...`);
+      const result = await exec.run(["docker", ...dockerArgs], { allowNonZeroExit: true });
+    
+      // Clean up script
+      await exec.run(["rm", scriptPath], { allowNonZeroExit: true });
+
+      if (result.code !== 0) {
+        console.error("[VERIFY] Filesystem verification failed");
+        console.error(result.stdout);
+        console.error(result.stderr);
+        throw new Error(`Filesystem verification failed with exit code ${result.code}`);
+      }
+
+      console.log("[VERIFY] All filesystem checks passed\n");
+    } finally {
+      // Always remount after checks
+      await exec.run(["diskutil", "mountDisk", device.disk], { allowNonZeroExit: true });
+    }
+  }
 
 // Shared utility: prepare working image (decompress or copy)
 async function prepareWorkingImage(
@@ -271,7 +381,8 @@ async function main() {
   if (command === "write") {
     const { args, positional } = parseArgs(rest, [
       { name: "device", type: "string" },
-      { name: "block-size", type: "string" }
+      { name: "block-size", type: "string" },
+      { name: "verify-fs", type: "boolean" }
     ]);
     const image = positional[0];
     if (!image) throw new Error("Missing <image>");
@@ -280,9 +391,10 @@ async function main() {
     const bs = resolveBlockSize(args["block-size"] as string | undefined);
     const algo = detectCompressionByExt(image);
     const decomp = algo ? buildDecompressor(algo) : undefined;
+    const verifyFs = args["verify-fs"] || argv.includes("--verbose");
 
     await preflightImageSize(exec, image, device.disk, !!algo);
-    await writeImageToDevice(exec, image, device, bs, decomp);
+    await writeImageToDevice(exec, image, device, bs, decomp, verifyFs);
     
     console.log("✓ Write completed");
     if (argv.includes("--verbose")) {
@@ -390,7 +502,8 @@ async function main() {
       return;
     }
 
-    await writeImageToDevice(exec, finalPath, device, bs);
+    const verifyFs = args["verify-fs"] || args["verbose"];
+    await writeImageToDevice(exec, finalPath, device, bs, undefined, verifyFs);
     console.log("✓ Deploy completed (resize + write)");
     
     // Cleanup: delete working image unless --keep-working

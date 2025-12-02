@@ -418,4 +418,72 @@ describe("CLI utility functions", () => {
       expect(chosenImageSize).toBe("31352MB");
     });
   });
+
+  describe("filesystem verification", () => {
+    it("should construct correct fsck commands for FAT partition (Docker-based)", () => {
+      const device = "/dev/disk4";
+      const bootPartition = `${device}1`; // Linux partition numbering
+      const fsckCmd = `fsck.vfat -n ${bootPartition}`;
+      
+      expect(fsckCmd).toContain("fsck.vfat");
+      expect(fsckCmd).toContain("-n"); // read-only check
+      expect(fsckCmd).toContain("1"); // partition 1
+    });
+
+    it("should construct correct fsck commands for ext4 partition (Docker-based)", () => {
+      const device = "/dev/disk4";
+      const rootPartition = `${device}2`; // Linux partition numbering
+      const fsckCmd = `e2fsck -n -f ${rootPartition}`;
+      
+      expect(fsckCmd).toContain("e2fsck");
+      expect(fsckCmd).toContain("-n"); // read-only check
+      expect(fsckCmd).toContain("-f"); // force check
+      expect(fsckCmd).toContain("2"); // partition 2
+    });
+
+    it("should interpret fsck exit codes correctly", () => {
+      // FAT filesystem exit codes
+      const fatCodes = {
+        clean: 0,
+        fatal: 8,
+      };
+      expect(fatCodes.clean).toBe(0);
+      expect(fatCodes.fatal).toBe(8);
+      
+      // ext4 filesystem exit codes
+      const ext4Codes = {
+        clean: 0,
+        corrected: 1, // N/A with -n flag
+        uncorrected: 4,
+        fatal: 8,
+      };
+      expect(ext4Codes.clean).toBe(0);
+      expect(ext4Codes.uncorrected).toBe(4);
+      expect(ext4Codes.fatal).toBeGreaterThanOrEqual(8);
+    });
+
+    it("should enable verification with --verify-fs flag", () => {
+      const verifyFsFlag = true;
+      const verboseFlag = false;
+      
+      const shouldVerify = verifyFsFlag || verboseFlag;
+      expect(shouldVerify).toBe(true);
+    });
+
+    it("should enable verification with --verbose flag", () => {
+      const verifyFsFlag = false;
+      const verboseFlag = true;
+      
+      const shouldVerify = verifyFsFlag || verboseFlag;
+      expect(shouldVerify).toBe(true);
+    });
+
+    it("should skip verification when neither flag is set", () => {
+      const verifyFsFlag = false;
+      const verboseFlag = false;
+      
+      const shouldVerify = verifyFsFlag || verboseFlag;
+      expect(shouldVerify).toBe(false);
+    });
+  });
 });

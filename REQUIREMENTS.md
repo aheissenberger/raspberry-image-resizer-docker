@@ -495,8 +495,13 @@ The deploy command must:
    - Execute resize operation on working image (same Docker workflow as resize command)
    - Preflight: Verify final image size fits on target device
    - Write resized image to SD card (same as write command)
+   - **Filesystem Verification** (optional with `--verify-fs` or `--verbose`):
+     - Unmount device and run `fsck_msdos -n` on boot partition (FAT)
+     - Run `fsck.ext4 -n -f` on root partition (ext4)
+     - Interpret exit codes and report errors/warnings
+     - Provides confidence that write was successful and filesystems are healthy
    - Cleanup: Delete working image unless `--keep-working` specified
-   - Remount device volumes after write completes
+   - Remount device volumes after verification/write completes
 6. **Progress and timing**:
    - With `--verbose`: Log duration for resize phase, write phase, and total operation
    - Format durations in human-readable format (e.g., "1m 23s", "3.5s")
@@ -763,9 +768,10 @@ Tool must:
 ✔ Deploy aborts if resized image doesn't fit on target device
 
 ### Filesystem Verification
-✔ --verify-fs flag runs final read-only e2fsck check regardless of verbosity  
+✔ --verify-fs flag runs filesystem verification via Docker (read-only checks)  
 ✔ --verbose automatically enables final filesystem verification  
-✔ Worker Step 10b interprets e2fsck exit codes correctly (0=clean, 4=warn, ≥8=fatal)  
+✔ Resize worker: runs `e2fsck -f -n` on root ext4 inside Docker and interprets exit codes correctly (0=clean, 4=warn, ≥8=fatal)  
+✔ Write/deploy: runs `fsck.vfat -n` for boot (FAT) and `e2fsck -f -n` for root (ext4) inside Docker after device write  
 ✔ Verification provides confidence in filesystem integrity after operations
 
 ### Image Size Adjustment
