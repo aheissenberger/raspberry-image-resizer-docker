@@ -115,6 +115,8 @@ async function writeImageToDevice(
   decompressor?: string[],
   verifyFs?: boolean
 ): Promise<void> {
+  // Proactively request sudo to avoid pause when dd starts
+  await exec.run(["sudo", "-v"], { allowNonZeroExit: true });
   await exec.run(["diskutil", "unmountDisk", device.disk], { allowNonZeroExit: true });
   
   console.log(`About to WRITE image to device: ${device.disk} (raw ${device.rdisk})`);
@@ -465,6 +467,12 @@ async function main() {
     const safeBytes = Math.floor(devSizeBytes * 0.98); // 2% headroom
     const safeMB = Math.floor(safeBytes / 1024 / 1024);
     const chosenImageSize = (args["image-size"] as string | undefined) ?? `${safeMB}MB`;
+    if (args["verbose"]) {
+      console.log(`[DEPLOY] Target device: ${device.disk} (raw ${device.rdisk})`);
+      const devGiB = bytesToGiB(devSizeBytes);
+      console.log(`[DEPLOY] Device capacity: ${devGiB} GiB (${devSizeBytes} bytes)`);
+      console.log(`[DEPLOY] Chosen image size: ${chosenImageSize} (2% headroom)`);
+    }
 
     const dockerImage = (args["docker-image"] as string) || "rpi-image-resizer:latest";
     const env = {
@@ -493,7 +501,12 @@ async function main() {
 
     // Phase 2: Write working image to device
     const writeStart = Date.now();
+    // Proactively request sudo to avoid pause when dd starts
+    await exec.run(["sudo", "-v"], { allowNonZeroExit: true });
     const finalPath = `${workDir}/${workingName}`;
+    if (args["verbose"]) {
+      console.log(`[DEPLOY] Writing image to ${device.rdisk} with bs=${bs}`);
+    }
     await preflightImageSize(exec, finalPath, device.disk, false);
 
     if (args["preview"]) {
