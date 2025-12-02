@@ -443,6 +443,9 @@ async function main() {
     const workingName = `${bareOriginal}_${ts}.img`;
     const workingPath = `${workDir}/${workingName}`;
 
+    // Proactively request sudo to avoid pause when dd starts
+    await exec.run(["sudo", "-v"], { allowNonZeroExit: true });
+
     // Phase 1: Prepare working image (decompress/copy) + Resize in Docker
     const resizeStart = Date.now();
     const workImage = await prepareWorkingImage(image, workingPath, !!args["dry-run"]);
@@ -501,8 +504,6 @@ async function main() {
 
     // Phase 2: Write working image to device
     const writeStart = Date.now();
-    // Proactively request sudo to avoid pause when dd starts
-    await exec.run(["sudo", "-v"], { allowNonZeroExit: true });
     const finalPath = `${workDir}/${workingName}`;
     if (args["verbose"]) {
       console.log(`[DEPLOY] Writing image to ${device.rdisk} with bs=${bs}`);
