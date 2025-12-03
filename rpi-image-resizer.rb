@@ -11,10 +11,21 @@ class RpiImageResizer < Formula
     sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   end
 
-  depends_on "docker" => :recommended
-
   def install
     bin.install "rpi-tool"
+  end
+
+  def caveats
+    <<~EOS
+      This tool requires either Docker Desktop or a Docker-compatible container runtime.
+      
+      Install Docker Desktop:
+        brew install --cask docker
+      
+      Or use an existing Docker installation (including Docker Desktop, Colima, or Rancher Desktop).
+      Verify Docker is available:
+        docker --version
+    EOS
   end
 
   test do
