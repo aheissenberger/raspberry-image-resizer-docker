@@ -550,13 +550,11 @@ brew reinstall rpi-image-resizer
 
 The Homebrew formula supports both Apple Silicon and Intel Macs:
 - **arm64**: Built on Apple Silicon Mac
-- **amd64**: Built on Intel Mac or via cross-compilation
+- **amd64**: Built on Intel Mac or via cross-compilation (currently not implemented)
 
-To build both architectures:
-1. Build arm64 tarball on Apple Silicon Mac
-2. Build amd64 tarball on Intel Mac (or use GitHub Actions)
-3. Run `node ./scripts/update-formula.js` to update both SHA256 values
-4. Run `bun run release` to publish release with both assets
+To release new version:
+1. update package version `bun pm version patch`
+3. Run `bun run release` to create a release with the binaries on github and publish an updated homebrew formlar
 
 ## Troubleshooting
 
